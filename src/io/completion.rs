@@ -1,8 +1,5 @@
-use std::{
-    net::{TcpListener, TcpStream},
-    os::fd::{AsFd, AsRawFd},
-};
-
+use crate::io::generic::{ServerSocket, IO};
+use std::sync::Arc;
 use turso_core::Completion as TursoCompletion;
 
 pub enum WrappedCompletion {
@@ -17,20 +14,23 @@ pub enum Completion {
 }
 
 impl Completion {
-    fn callback(self) {
+    pub fn new_accept() -> Self {
+        let c = AcceptCompletion {};
+        Self::Accept(c)
+    }
+
+    pub fn callback(&self, result: i32) {
         match self {
-            Self::Accept(c) => c.callback(),
+            Self::Accept(c) => c.callback(result),
             Self::ReadSocket => {}
             Self::WriteSocket => {}
         }
     }
 }
 
-pub struct AcceptCompletion {
-    pub sock: TcpStream,
-}
+pub struct AcceptCompletion {}
 impl AcceptCompletion {
-    fn callback(self) {
-        println!("accepted connection {:?}", self.sock)
+    fn callback(&self, result: i32) {
+        println!("accepted connection with fd: {:?}", result);
     }
 }

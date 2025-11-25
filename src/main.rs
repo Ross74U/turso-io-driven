@@ -1,7 +1,14 @@
 use anyhow::{bail, Result};
+use std::net::TcpListener;
 use std::sync::Arc;
-use turso_core::IO;
-use turso_io::{io::io_uring::UringIO, IoBuilder};
+use turso_io::{
+    io::{
+        completion::{AcceptCompletion, Completion},
+        generic::{ServerSocket, IO},
+        io_uring::UringIO,
+    },
+    IoBuilder,
+};
 
 const DB_FILE: &str = "database.db";
 
@@ -21,6 +28,21 @@ fn main() {
     let stmt = connection.prepare(SQL_CREATE_TABLE).unwrap();
     let changes = execute_until_done(stmt, &mut io).unwrap();
     println!("execute completed! changes: {:?}", changes);
+
+    let listener = TcpListener::bind("127.0.0.1:8000").unwrap();
+    listener.set_nonblocking(true).unwrap();
+
+    let server_socket = io.register_listener(listener).unwrap();
+    server_socket.accept(Completion::new_accept()).unwrap();
+
+    dbg!("waiting for a connection");
+    loop {
+        if let Err(err) = io.step() {
+            dbg!("Err during step: {:?}", err);
+        };
+        server_socket.accept(Completion::new_accept()).unwrap();
+        dbg!("step complete");
+    }
 }
 
 /// this just runs the io loop until the statement is executed

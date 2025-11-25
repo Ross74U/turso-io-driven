@@ -197,14 +197,24 @@ impl UringIO {
                 }
                 continue;
             }
+            let c = wrapped_completion_from_key(user_data);
+            handle_wrapped_completion(c, result);
+        }
+    }
+}
+
+pub fn handle_wrapped_completion(c: Arc<WrappedCompletion>, result: i32) {
+    match c.as_ref() {
+        WrappedCompletion::TursoCompletion(c) => {
             if result < 0 {
                 let errno = -result;
                 let err = std::io::Error::from_raw_os_error(errno);
-                turso_completion_from_key(user_data).error(err.into());
+                c.error(err.into());
             } else {
-                turso_completion_from_key(user_data).complete(result)
+                c.complete(result);
             }
         }
+        WrappedCompletion::Completion(c) => c.callback(result),
     }
 }
 
@@ -974,18 +984,17 @@ impl IO for UringIO {
 
     /// register a std::net::TcpListener to obtain a UringServerSocket
     /// it is up to the user to ensure nonblocking is set
-    #[allow(refining_impl_trait)]
     fn register_listener(
-        &mut self,
+        &self,
         listener: std::net::TcpListener,
-    ) -> anyhow::Result<UringServerSocket> {
-        let id = self.inner.lock().register_file(listener.as_raw_fd())?; // here we panic if there
+    ) -> anyhow::Result<Arc<dyn ServerSocket>> {
+        let id = self.inner.lock().register_file(listener.as_raw_fd())?; // here we fail if there
                                                                          // are no open file slots, but in the future we should resort registering dynamically
-        Ok(UringServerSocket {
+        Ok(Arc::new(UringServerSocket {
             io: self.inner.clone(),
             listener,
             id,
-        })
+        }))
     }
 }
 
@@ -996,17 +1005,14 @@ pub struct UringServerSocket {
 }
 
 impl ServerSocket for UringServerSocket {
-    fn accept(&mut self, c: Completion) -> anyhow::Result<()> {
+    fn accept(&self, c: Completion) -> anyhow::Result<()> {
         let fd = io_uring::types::Fixed(self.id);
-        let mut addr: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+        let mut addr: libc::sockaddr = unsafe { std::mem::zeroed() };
         let mut addrlen = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-        let ring_entry = io_uring::opcode::Accept::new(
-            fd,
-            &mut addr as *mut _ as *mut libc::sockaddr,
-            &mut addrlen as *mut libc::socklen_t,
-        )
-        .build()
-        .user_data(get_key_from_completion(c));
+        let ring_entry =
+            io_uring::opcode::Accept::new(fd, &mut addr as *mut _, &mut addrlen as *mut _)
+                .build()
+                .user_data(get_key_from_completion(c));
 
         self.io.lock().ring.submit_entry(&ring_entry);
         Ok(())
