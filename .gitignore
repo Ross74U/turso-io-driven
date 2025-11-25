@@ -1,1 +1,4 @@
 /target
+/.database.db
+/.database.db-wal
+
