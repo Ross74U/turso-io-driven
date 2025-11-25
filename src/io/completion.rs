@@ -1,3 +1,8 @@
+use std::{
+    net::{TcpListener, TcpStream},
+    os::fd::{AsFd, AsRawFd},
+};
+
 use turso_core::Completion as TursoCompletion;
 
 pub enum WrappedCompletion {
@@ -5,16 +10,27 @@ pub enum WrappedCompletion {
     Completion(Completion),
 }
 
-pub enum CompletionType {
-    Accept,
+pub enum Completion {
+    Accept(AcceptCompletion),
     ReadSocket,
     WriteSocket,
 }
 
-pub struct Completion {
-    completion_type: CompletionType,
+impl Completion {
+    fn callback(self) {
+        match self {
+            Self::Accept(c) => c.callback(),
+            Self::ReadSocket => {}
+            Self::WriteSocket => {}
+        }
+    }
 }
 
-impl Completion {
-    // TODO: callback handling, typed constructor
+pub struct AcceptCompletion {
+    pub sock: TcpStream,
+}
+impl AcceptCompletion {
+    fn callback(self) {
+        println!("accepted connection {:?}", self.sock)
+    }
 }

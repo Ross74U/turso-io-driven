@@ -1,6 +1,8 @@
 #![allow(clippy::arc_with_non_send_sync)]
 
 use super::completion::{Completion, WrappedCompletion};
+use super::generic::{ServerSocket, IO};
+
 use parking_lot::Mutex;
 use rustix::fs::{self, FlockOperation, OFlags};
 use std::ptr::NonNull;
@@ -13,9 +15,21 @@ use std::{
     sync::Arc,
 };
 use tracing::{debug, trace};
-use turso_core::io::clock::{Clock, DefaultClock, Instant};
-use turso_core::{turso_assert, LimboError, Result};
-use turso_core::{Completion as TursoCompletion, File, OpenFlags, IO as TursoIO};
+use turso_core::{
+    turso_assert, Clock, Completion as TursoCompletion, File, Instant, LimboError, OpenFlags,
+    Result, IO as TursoIO,
+};
+
+pub struct SysClock;
+impl Clock for SysClock {
+    fn now(&self) -> Instant {
+        let now = chrono::Local::now();
+        Instant {
+            secs: now.timestamp(),
+            micros: now.timestamp_subsec_micros(),
+        }
+    }
+}
 
 pub const ENV_DISABLE_FILE_LOCK: &str = "LIMBO_DISABLE_FILE_LOCK";
 pub const CKPT_BATCH_PAGES: usize = 512;
@@ -127,6 +141,7 @@ impl UringIO {
         // to similar logic as the existing buffer pool for cases where it is over capacity.
         ring.submitter()
             .register_buffers_sparse(ARENA_COUNT as u32)?;
+
         let inner = InnerUringIO {
             ring: WrappedIOUring {
                 ring,
@@ -143,6 +158,53 @@ impl UringIO {
         Ok(Self {
             inner: Arc::new(Mutex::new(inner)),
         })
+    }
+
+    fn step(&self) -> Result<()> {
+        trace!("step()");
+        let mut inner = self.inner.lock();
+        let ring = &mut inner.ring;
+        ring.flush_overflow()?;
+        if ring.empty() {
+            return Ok(());
+        }
+        ring.submit_and_wait()?;
+        loop {
+            let Some(cqe) = ring.ring.completion().next() else {
+                return Ok(());
+            };
+            ring.pending_ops -= 1;
+            let user_data = cqe.user_data();
+            if user_data == CANCEL_TAG {
+                // ignore if this is a cancellation CQE
+                continue;
+            }
+            let result = cqe.result();
+            turso_assert!(
+                user_data != 0,
+                "user_data must not be zero, we dont submit linked timeouts that would cause this"
+            );
+            if let Some(state) = ring.writev_states.remove(&user_data) {
+                // if we have ongoing writev state, handle it separately and don't call completion
+                ring.handle_writev_completion(state, user_data, result);
+                continue;
+            } else if user_data == BARRIER_USER_DATA {
+                // barrier operation, no completion to call
+                if result < 0 {
+                    let err = std::io::Error::from_raw_os_error(result);
+                    tracing::error!("barrier operation failed: {}", err);
+                    return Err(err.into());
+                }
+                continue;
+            }
+            if result < 0 {
+                let errno = -result;
+                let err = std::io::Error::from_raw_os_error(errno);
+                turso_completion_from_key(user_data).error(err.into());
+            } else {
+                turso_completion_from_key(user_data).complete(result)
+            }
+        }
     }
 }
 
@@ -626,50 +688,7 @@ impl TursoIO for UringIO {
     }
 
     fn step(&self) -> Result<()> {
-        trace!("step()");
-        let mut inner = self.inner.lock();
-        let ring = &mut inner.ring;
-        ring.flush_overflow()?;
-        if ring.empty() {
-            return Ok(());
-        }
-        ring.submit_and_wait()?;
-        loop {
-            let Some(cqe) = ring.ring.completion().next() else {
-                return Ok(());
-            };
-            ring.pending_ops -= 1;
-            let user_data = cqe.user_data();
-            if user_data == CANCEL_TAG {
-                // ignore if this is a cancellation CQE
-                continue;
-            }
-            let result = cqe.result();
-            turso_assert!(
-                user_data != 0,
-                "user_data must not be zero, we dont submit linked timeouts that would cause this"
-            );
-            if let Some(state) = ring.writev_states.remove(&user_data) {
-                // if we have ongoing writev state, handle it separately and don't call completion
-                ring.handle_writev_completion(state, user_data, result);
-                continue;
-            } else if user_data == BARRIER_USER_DATA {
-                // barrier operation, no completion to call
-                if result < 0 {
-                    let err = std::io::Error::from_raw_os_error(result);
-                    tracing::error!("barrier operation failed: {}", err);
-                    return Err(err.into());
-                }
-                continue;
-            }
-            if result < 0 {
-                let errno = -result;
-                let err = std::io::Error::from_raw_os_error(errno);
-                turso_completion_from_key(user_data).error(err.into());
-            } else {
-                turso_completion_from_key(user_data).complete(result)
-            }
-        }
+        self.step()
     }
 
     fn register_fixed_buffer(&self, ptr: std::ptr::NonNull<u8>, len: usize) -> Result<u32> {
@@ -698,7 +717,7 @@ impl TursoIO for UringIO {
 
 impl Clock for UringIO {
     fn now(&self) -> Instant {
-        DefaultClock.now()
+        SysClock.now()
     }
 }
 
@@ -728,7 +747,7 @@ fn turso_completion_from_key(key: u64) -> TursoCompletion {
     let wrapped = unsafe { Arc::from_raw(key as *const WrappedCompletion) };
     match wrapped.as_ref() {
         WrappedCompletion::TursoCompletion(c) => c.clone(),
-        _ => TursoCompletion { inner: None },
+        _ => TursoCompletion::new_yield(),
     }
 }
 
@@ -944,5 +963,52 @@ impl Drop for UringFile {
                 })
                 .ok();
         }
+    }
+}
+
+impl IO for UringIO {
+    fn step(&self) -> anyhow::Result<()> {
+        self.step()?;
+        Ok(())
+    }
+
+    /// register a std::net::TcpListener to obtain a UringServerSocket
+    /// it is up to the user to ensure nonblocking is set
+    #[allow(refining_impl_trait)]
+    fn register_listener(
+        &mut self,
+        listener: std::net::TcpListener,
+    ) -> anyhow::Result<UringServerSocket> {
+        let id = self.inner.lock().register_file(listener.as_raw_fd())?; // here we panic if there
+                                                                         // are no open file slots, but in the future we should resort registering dynamically
+        Ok(UringServerSocket {
+            io: self.inner.clone(),
+            listener,
+            id,
+        })
+    }
+}
+
+pub struct UringServerSocket {
+    io: Arc<Mutex<InnerUringIO>>,
+    listener: std::net::TcpListener,
+    id: u32, // fixed id; we can make this optional if we choose to not preregister the file
+}
+
+impl ServerSocket for UringServerSocket {
+    fn accept(&mut self, c: Completion) -> anyhow::Result<()> {
+        let fd = io_uring::types::Fixed(self.id);
+        let mut addr: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+        let mut addrlen = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+        let ring_entry = io_uring::opcode::Accept::new(
+            fd,
+            &mut addr as *mut _ as *mut libc::sockaddr,
+            &mut addrlen as *mut libc::socklen_t,
+        )
+        .build()
+        .user_data(get_key_from_completion(c));
+
+        self.io.lock().ring.submit_entry(&ring_entry);
+        Ok(())
     }
 }

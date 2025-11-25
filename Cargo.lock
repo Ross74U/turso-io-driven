@@ -259,12 +259,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "either"
-version = "1.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
-
-[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1123,7 +1117,9 @@ dependencies = [
 
 [[package]]
 name = "turso_core"
-version = "0.4.0-pre.2"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd5a3044961c822886d08cbc94f5519524213b877f65fb66ab70133ed3c0a36d"
 dependencies = [
  "aegis",
  "aes",
@@ -1135,7 +1131,6 @@ dependencies = [
  "cfg_block",
  "chrono",
  "crossbeam-skiplist",
- "either",
  "fallible-iterator",
  "hex",
  "intrusive-collections",
@@ -1171,7 +1166,9 @@ dependencies = [
 
 [[package]]
 name = "turso_ext"
-version = "0.4.0-pre.2"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c744b2d657542911d6b1708f8aa2f047601cc0d452af8cd2d7f8fb1c05d40730"
 dependencies = [
  "chrono",
  "getrandom 0.3.4",
@@ -1183,6 +1180,7 @@ name = "turso_io"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "io-uring",
  "libc",
  "parking_lot",
@@ -1194,7 +1192,9 @@ dependencies = [
 
 [[package]]
 name = "turso_macros"
-version = "0.4.0-pre.2"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4631f270381e6153833ab491b42fca3a1dbaad0f657a12ea1d676dec8f71e7b1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1203,7 +1203,9 @@ dependencies = [
 
 [[package]]
 name = "turso_parser"
-version = "0.4.0-pre.2"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b64ae3d49b989ed156abe143ae0244d0f239f67fc42da72806369a567f295750"
 dependencies = [
  "bitflags",
  "miette",

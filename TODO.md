@@ -6,4 +6,4 @@ our own completion variant without patching turso_core too much
 
 - [ ] impl basic async logic with custom enums (tcp server)
 
-- [ ] add epoll support using io_uring 
+- [ ] Generic IO for app

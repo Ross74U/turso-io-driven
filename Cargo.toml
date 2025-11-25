@@ -5,13 +5,11 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.100"
+chrono = "0.4.42"
 io-uring = "0.7.11"
 libc = "0.2.177"
 parking_lot = "0.12.5"
 rustix = "1.1.2"
 tempfile = "3.23.0"
 tracing = "0.1.41"
-turso_core = { version = "0.4.0-pre.2", features = ["io_uring", "fs"] }
-
-[patch.crates-io]
-turso_core = { path = "../turso/core" }
+turso_core = { version = "0.3.2", features = ["io_uring", "fs"] }
