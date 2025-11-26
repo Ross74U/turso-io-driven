@@ -2,11 +2,7 @@ use anyhow::{bail, Result};
 use std::net::TcpListener;
 use std::sync::Arc;
 use turso_io::{
-    io::{
-        completion::{AcceptCompletion, Completion},
-        generic::{ServerSocket, IO},
-        io_uring::UringIO,
-    },
+    io::{completion::Completion, generic::IO, io_uring::UringIO},
     IoBuilder,
 };
 
@@ -35,14 +31,12 @@ fn main() {
     let server_socket = io.register_listener(listener).unwrap();
     server_socket.accept(Completion::new_accept()).unwrap();
 
+    // create a run queue here
     dbg!("waiting for a connection");
-    loop {
-        if let Err(err) = io.step() {
-            dbg!("Err during step: {:?}", err);
-        };
-        server_socket.accept(Completion::new_accept()).unwrap();
-        dbg!("step complete");
-    }
+    if let Err(err) = io.step() {
+        // step triggers wakers
+        dbg!("Err during step: {:?}", err);
+    };
 }
 
 /// this just runs the io loop until the statement is executed

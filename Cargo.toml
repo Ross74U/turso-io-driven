@@ -6,10 +6,12 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.100"
 chrono = "0.4.42"
+crossbeam = "0.8.4"
 io-uring = "0.7.11"
 libc = "0.2.177"
 parking_lot = "0.12.5"
 rustix = "1.1.2"
+slab = "0.4.11"
 tempfile = "3.23.0"
 tracing = "0.1.41"
 turso_core = { version = "0.3.2", features = ["io_uring", "fs"] }
