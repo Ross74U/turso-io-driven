@@ -746,7 +746,7 @@ fn get_key_from_completion(c: Completion) -> u64 {
 }
 
 #[inline(always)]
-fn wrapped_completion_from_key(key: u64) -> Arc<WrappedCompletion> {
+fn wrapped_completion_from_key<'a>(key: u64) -> Arc<WrappedCompletion<'a>> {
     unsafe { Arc::from_raw(key as *const WrappedCompletion) }
 }
 
@@ -1009,6 +1009,7 @@ impl ServerSocket for UringServerSocket {
         let fd = io_uring::types::Fixed(self.id);
         let mut addr: libc::sockaddr = unsafe { std::mem::zeroed() };
         let mut addrlen = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+        // TODO: this is a UAF rn, just testing, relax
         let ring_entry =
             io_uring::opcode::Accept::new(fd, &mut addr as *mut _, &mut addrlen as *mut _)
                 .build()

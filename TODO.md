@@ -6,4 +6,4 @@ our own completion variant without patching turso_core too much
 
 - [x] impl basic async logic with custom enums (tcp server)
 
-- [ ] impl atomic waker and run queue
+- [ ] impl custom lifetime based waker (nonstd) and run queue (crossbeam)

@@ -29,7 +29,6 @@ fn main() {
     listener.set_nonblocking(true).unwrap();
 
     let server_socket = io.register_listener(listener).unwrap();
-    server_socket.accept(Completion::new_accept()).unwrap();
 
     // create a run queue here
     dbg!("waiting for a connection");

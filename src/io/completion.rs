@@ -1,21 +1,20 @@
-use crate::io::generic::{ServerSocket, IO};
-use std::sync::Arc;
+use super::runtime::{ProgramWaker, Waker};
 use turso_core::Completion as TursoCompletion;
 
-pub enum WrappedCompletion {
+pub enum WrappedCompletion<'a> {
     TursoCompletion(TursoCompletion),
-    Completion(Completion),
+    Completion(Completion<'a>),
 }
 
-pub enum Completion {
-    Accept(AcceptCompletion),
+pub enum Completion<'a> {
+    Accept(AcceptCompletion<'a>),
     ReadSocket,
     WriteSocket,
 }
 
-impl Completion {
-    pub fn new_accept() -> Self {
-        let c = AcceptCompletion {};
+impl<'a> Completion<'a> {
+    pub fn new_accept(waker: ProgramWaker<'a>) -> Self {
+        let c = AcceptCompletion { waker };
         Self::Accept(c)
     }
 
@@ -28,9 +27,12 @@ impl Completion {
     }
 }
 
-pub struct AcceptCompletion {}
-impl AcceptCompletion {
+pub struct AcceptCompletion<'a> {
+    waker: ProgramWaker<'a>,
+}
+impl<'a> AcceptCompletion<'a> {
     fn callback(&self, result: i32) {
         println!("accepted connection with fd: {:?}", result);
+        self.waker.wake_by_ref();
     }
 }
