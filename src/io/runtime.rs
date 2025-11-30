@@ -1,32 +1,55 @@
+use crate::io::completion::WrappedCompletion;
 use crate::io::{completion::Completion, generic::ServerSocket};
 use anyhow::Result;
 use crossbeam::queue::ArrayQueue;
+use std::cell::RefCell;
+use std::sync::Arc;
 
-pub struct Runtime<'a> {
-    tasks: slab::Slab<Box<Program<'a>>>,
-    run_queue: ArrayQueue<&'a Program<'a>>, // pointers to Program inner
+pub struct Runtime<'rt> {
+    programs: RefCell<slab::Slab<Box<Program<'rt>>>>,
+    run_queue: ArrayQueue<usize>,
 }
-impl<'a> Runtime<'a> {
-    pub fn run_once(&'a self) -> Result<()> {
-        loop {
-            let Some(program) = self.run_queue.pop() else {break};
-            let waker = ProgramWaker {
-                run_queue: &self.run_queue,
-                program,
-            };
-            program.step(waker)?;
+impl<'rt> Runtime<'rt> {
+    pub fn new() -> Self {
+        Runtime {
+            programs: RefCell::new(slab::Slab::with_capacity(128)),
+            run_queue: ArrayQueue::new(128),
         }
+    }
 
+    pub fn step(&'rt self) -> Result<()> {
+        let programs = self.programs.borrow();
+        loop {
+            let Some(id) = self.run_queue.pop() else {
+                break;
+            };
+            let waker = ProgramWaker {
+                program_id: id,
+                run_queue: &self.run_queue,
+            };
+            let Some(p) = programs.get(id) else {
+                continue;
+            };
+            p.step(waker)?;
+        }
         Ok(())
     }
 
     /// creates a new accept program on the tasks slab and pushes it onto run_queue
-    pub fn new_accept(&mut self) -> usize {
-        todo!();
+    pub fn new_accept(&'rt self, server_socket: Arc<dyn ServerSocket>) -> usize {
+        let p = Box::new(Program::Accept(AcceptProgram {
+            parent: self,
+            server_socket,
+        }));
+        self.programs.borrow_mut().insert(p)
+    }
+
+    pub fn queue(&self, id: usize) {
+        self.run_queue.force_push(id);
     }
 
     /// get a readable reference to a program
-    pub fn get_program(&self, id: usize) -> &'a Program<'a> {
+    pub fn get_program(&self, id: usize) -> &'rt Program<'rt> {
         todo!();
     }
 
@@ -40,7 +63,7 @@ pub enum Program<'a> {
     Accept(AcceptProgram<'a>),
 }
 impl<'a> Program<'a> {
-    fn step(&'a self, waker: ProgramWaker<'a>) -> Result<()> {
+    fn step(&self, waker: ProgramWaker<'a>) -> Result<()> {
         match self {
             Self::Accept(s) => s.step(waker),
         }
@@ -53,32 +76,33 @@ impl<'a> Program<'a> {
 }
 
 pub struct AcceptProgram<'a> {
-    server_socket: Box<dyn ServerSocket>,
+    server_socket: Arc<dyn ServerSocket>,
     parent: &'a Runtime<'a>, // parent runtime
 }
 impl<'a> AcceptProgram<'a> {
     fn step(&self, waker: ProgramWaker<'a>) -> Result<()> {
-        let c = Completion::new_accept(waker);
-        let c = self.server_socket.accept(c)?; // todo, change api so c is still kept, thus result
+        let c = Arc::new(WrappedCompletion::Completion(Completion::new_accept(waker)));
+        self.server_socket.accept(c.clone())?; // todo, change api so c is still kept, thus result
+        println!("submitted accept completion from accept program");
         Ok(())
     }
-
     fn parent(&self) -> &'a Runtime {
         self.parent
     }
 }
 
-pub trait Waker {
-    fn wake_by_ref(&self) {}
+pub trait Waker<'a> {
+    fn wake_by_ref(&'a self) {}
 }
 
 pub struct ProgramWaker<'a> {
-    run_queue: &'a ArrayQueue<&'a Program<'a>>,
-    program: &'a Program<'a>,
+    program_id: usize,
+    run_queue: &'a ArrayQueue<usize>,
 }
-impl<'a> Waker for ProgramWaker<'a> {
-    fn wake_by_ref(&self) {
+
+impl<'a> Waker<'a> for ProgramWaker<'a> {
+    fn wake_by_ref(&'a self) {
         // TODO: handle full run queue better
-        self.run_queue.force_push(self.program);
+        self.run_queue.force_push(self.program_id);
     }
 }

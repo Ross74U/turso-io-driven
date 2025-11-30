@@ -1,4 +1,4 @@
-use super::completion::Completion;
+use crate::io::completion::WrappedCompletion;
 use std::sync::Arc;
 
 /// generic IO trait for the application
@@ -13,5 +13,5 @@ pub trait IO {
 }
 
 pub trait ServerSocket {
-    fn accept(&self, c: Completion) -> anyhow::Result<()>;
+    fn accept(&self, c: Arc<WrappedCompletion>) -> anyhow::Result<()>;
 }

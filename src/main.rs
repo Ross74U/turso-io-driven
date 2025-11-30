@@ -1,9 +1,9 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::net::TcpListener;
 use std::sync::Arc;
 use turso_io::{
-    io::{completion::Completion, generic::IO, io_uring::UringIO},
     IoBuilder,
+    io::{completion::Completion, generic::IO, io_uring::UringIO, runtime::Runtime},
 };
 
 const DB_FILE: &str = "database.db";
@@ -28,14 +28,22 @@ fn main() {
     let listener = TcpListener::bind("127.0.0.1:8000").unwrap();
     listener.set_nonblocking(true).unwrap();
 
-    let server_socket = io.register_listener(listener).unwrap();
+    let rt = Runtime::new();
 
-    // create a run queue here
-    dbg!("waiting for a connection");
-    if let Err(err) = io.step() {
-        // step triggers wakers
-        dbg!("Err during step: {:?}", err);
-    };
+    let server_socket = io.register_listener(listener).unwrap();
+    let p = rt.new_accept(server_socket);
+    rt.queue(p);
+
+    loop {
+        if let Err(err) = rt.step() {
+            // step triggers wakers
+            dbg!("Err during rt step: {:?}", err);
+        };
+        if let Err(err) = io.step() {
+            // step triggers wakers
+            dbg!("Err during io step: {:?}", err);
+        };
+    }
 }
 
 /// this just runs the io loop until the statement is executed

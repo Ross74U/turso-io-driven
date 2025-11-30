@@ -1,7 +1,7 @@
 #![allow(clippy::arc_with_non_send_sync)]
 
 use super::completion::{Completion, WrappedCompletion};
-use super::generic::{ServerSocket, IO};
+use super::generic::{IO, ServerSocket};
 
 use parking_lot::Mutex;
 use rustix::fs::{self, FlockOperation, OFlags};
@@ -16,8 +16,8 @@ use std::{
 };
 use tracing::{debug, trace};
 use turso_core::{
-    turso_assert, Clock, Completion as TursoCompletion, File, Instant, LimboError, OpenFlags,
-    Result, IO as TursoIO,
+    Clock, Completion as TursoCompletion, File, IO as TursoIO, Instant, LimboError, OpenFlags,
+    Result, turso_assert,
 };
 
 pub struct SysClock;
@@ -622,7 +622,9 @@ impl TursoIO for UringIO {
         if direct {
             match fs::fcntl_setfl(fd, OFlags::DIRECT) {
                 Ok(_) => {}
-                Err(error) => debug!("Error {error:?} returned when setting O_DIRECT flag to read file. The performance of the system may be affected"),
+                Err(error) => debug!(
+                    "Error {error:?} returned when setting O_DIRECT flag to read file. The performance of the system may be affected"
+                ),
             }
         }
         let id = self.inner.lock().register_file(file.as_raw_fd()).ok();
@@ -666,9 +668,9 @@ impl TursoIO for UringIO {
                 }
                 let result = cqe.result();
                 turso_assert!(
-                user_data != 0,
-                "user_data must not be zero, we dont submit linked timeouts that would cause this"
-            );
+                    user_data != 0,
+                    "user_data must not be zero, we dont submit linked timeouts that would cause this"
+                );
                 if let Some(state) = ring.writev_states.remove(&user_data) {
                     // if we have ongoing writev state, handle it separately and don't call completion
                     ring.handle_writev_completion(state, user_data, result);
@@ -740,9 +742,8 @@ fn get_key_from_turso_completion(c: TursoCompletion) -> u64 {
 }
 
 #[inline(always)]
-fn get_key_from_completion(c: Completion) -> u64 {
-    let wrapper = Arc::new(WrappedCompletion::Completion(c));
-    Arc::into_raw(wrapper) as u64
+fn get_key_from_completion(c: Arc<WrappedCompletion>) -> u64 {
+    Arc::into_raw(c) as u64
 }
 
 #[inline(always)]
@@ -830,9 +831,7 @@ impl File for UringFile {
                 if let Some(idx) = buf.fixed_id() {
                     trace!(
                         "pread_fixed(pos = {}, length = {}, idx = {})",
-                        pos,
-                        len,
-                        idx
+                        pos, len, idx
                     );
                     #[cfg(debug_assertions)]
                     {
@@ -870,9 +869,7 @@ impl File for UringFile {
                 if let Some(idx) = buffer.fixed_id() {
                     trace!(
                         "pwrite_fixed(pos = {}, length = {}, idx= {})",
-                        pos,
-                        len,
-                        idx
+                        pos, len, idx
                     );
                     #[cfg(debug_assertions)]
                     {
@@ -989,7 +986,7 @@ impl IO for UringIO {
         listener: std::net::TcpListener,
     ) -> anyhow::Result<Arc<dyn ServerSocket>> {
         let id = self.inner.lock().register_file(listener.as_raw_fd())?; // here we fail if there
-                                                                         // are no open file slots, but in the future we should resort registering dynamically
+        // are no open file slots, but in the future we should resort registering dynamically
         Ok(Arc::new(UringServerSocket {
             io: self.inner.clone(),
             listener,
@@ -1005,7 +1002,7 @@ pub struct UringServerSocket {
 }
 
 impl ServerSocket for UringServerSocket {
-    fn accept(&self, c: Completion) -> anyhow::Result<()> {
+    fn accept(&self, c: Arc<WrappedCompletion>) -> anyhow::Result<()> {
         let fd = io_uring::types::Fixed(self.id);
         let mut addr: libc::sockaddr = unsafe { std::mem::zeroed() };
         let mut addrlen = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
