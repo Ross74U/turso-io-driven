@@ -1,6 +1,8 @@
 #![allow(clippy::arc_with_non_send_sync)]
 
-use super::completion::{Completion, WrappedCompletion};
+use crate::io::completion::SharedCompletion;
+
+use super::completion::Completion;
 use super::generic::{IO, ServerSocket};
 
 use parking_lot::Mutex;
@@ -203,9 +205,9 @@ impl UringIO {
     }
 }
 
-pub fn handle_wrapped_completion(c: Arc<WrappedCompletion>, result: i32) {
+pub fn handle_wrapped_completion(c: Arc<Completion>, result: i32) {
     match c.as_ref() {
-        WrappedCompletion::TursoCompletion(c) => {
+        Completion::TursoCompletion(c) => {
             if result < 0 {
                 let errno = -result;
                 let err = std::io::Error::from_raw_os_error(errno);
@@ -214,7 +216,7 @@ pub fn handle_wrapped_completion(c: Arc<WrappedCompletion>, result: i32) {
                 c.complete(result);
             }
         }
-        WrappedCompletion::Completion(c) => c.callback(result),
+        Completion::AppCompletion(c) => c.callback(result),
     }
 }
 
@@ -737,27 +739,27 @@ impl Clock for UringIO {
 /// use the callback pointer as the user_data for the operation as is
 /// common practice for io_uring to prevent more indirection
 fn get_key_from_turso_completion(c: TursoCompletion) -> u64 {
-    let wrapper = Arc::new(WrappedCompletion::TursoCompletion(c));
+    let wrapper = Arc::new(Completion::TursoCompletion(c));
     Arc::into_raw(wrapper) as u64
 }
 
 #[inline(always)]
-fn get_key_from_completion(c: Arc<WrappedCompletion>) -> u64 {
+fn get_key_from_completion(c: Arc<Completion>) -> u64 {
     Arc::into_raw(c) as u64
 }
 
 #[inline(always)]
-fn wrapped_completion_from_key<'a>(key: u64) -> Arc<WrappedCompletion<'a>> {
-    unsafe { Arc::from_raw(key as *const WrappedCompletion) }
+fn wrapped_completion_from_key<'a>(key: u64) -> Arc<Completion<'a>> {
+    unsafe { Arc::from_raw(key as *const Completion) }
 }
 
 #[inline(always)]
 // used in TursoIO implementation step, so we ignore none-TursoCompletion variants by turning them
 // into NoOp: TursoCompletion {None}
 fn turso_completion_from_key(key: u64) -> TursoCompletion {
-    let wrapped = unsafe { Arc::from_raw(key as *const WrappedCompletion) };
+    let wrapped = unsafe { Arc::from_raw(key as *const Completion) };
     match wrapped.as_ref() {
-        WrappedCompletion::TursoCompletion(c) => c.clone(),
+        Completion::TursoCompletion(c) => c.clone(),
         _ => TursoCompletion::new_yield(),
     }
 }
@@ -1002,7 +1004,7 @@ pub struct UringServerSocket {
 }
 
 impl ServerSocket for UringServerSocket {
-    fn accept(&self, c: Arc<WrappedCompletion>) -> anyhow::Result<()> {
+    fn accept(&self, c: SharedCompletion) -> anyhow::Result<()> {
         let fd = io_uring::types::Fixed(self.id);
         let mut addr: libc::sockaddr = unsafe { std::mem::zeroed() };
         let mut addrlen = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;

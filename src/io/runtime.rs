@@ -1,5 +1,5 @@
-use crate::io::completion::WrappedCompletion;
-use crate::io::{completion::Completion, generic::ServerSocket};
+use crate::io::completion::{Completion, SharedCompletion};
+use crate::io::{completion::AppCompletion, generic::ServerSocket};
 use anyhow::Result;
 use crossbeam::queue::ArrayQueue;
 use std::cell::RefCell;
@@ -18,7 +18,7 @@ impl<'rt> Runtime<'rt> {
     }
 
     pub fn step(&'rt self) -> Result<()> {
-        let programs = self.programs.borrow();
+        let mut programs = self.programs.borrow_mut();
         loop {
             let Some(id) = self.run_queue.pop() else {
                 break;
@@ -27,7 +27,7 @@ impl<'rt> Runtime<'rt> {
                 program_id: id,
                 run_queue: &self.run_queue,
             };
-            let Some(p) = programs.get(id) else {
+            let Some(p) = programs.get_mut(id) else {
                 continue;
             };
             p.step(waker)?;
@@ -40,6 +40,7 @@ impl<'rt> Runtime<'rt> {
         let p = Box::new(Program::Accept(AcceptProgram {
             parent: self,
             server_socket,
+            completion: None,
         }));
         self.programs.borrow_mut().insert(p)
     }
@@ -63,7 +64,7 @@ pub enum Program<'a> {
     Accept(AcceptProgram<'a>),
 }
 impl<'a> Program<'a> {
-    fn step(&self, waker: ProgramWaker<'a>) -> Result<()> {
+    fn step(&mut self, waker: ProgramWaker<'a>) -> Result<()> {
         match self {
             Self::Accept(s) => s.step(waker),
         }
@@ -78,11 +79,27 @@ impl<'a> Program<'a> {
 pub struct AcceptProgram<'a> {
     server_socket: Arc<dyn ServerSocket>,
     parent: &'a Runtime<'a>, // parent runtime
+    completion: Option<SharedCompletion<'a>>,
 }
 impl<'a> AcceptProgram<'a> {
-    fn step(&self, waker: ProgramWaker<'a>) -> Result<()> {
-        let c = Arc::new(WrappedCompletion::Completion(Completion::new_accept(waker)));
+    fn step(&mut self, waker: ProgramWaker<'a>) -> Result<()> {
+        if let Some(c) = self.completion.as_ref() {
+            match c.as_ref() {
+                Completion::AppCompletion(c) => match c {
+                    AppCompletion::Accept(c) => {
+                        println!("c result: {:?}", c.result)
+                    }
+                    _ => unreachable!("completion should be accept"),
+                },
+                _ => {
+                    unreachable!("completion should be accept")
+                }
+            }
+        }
+
+        let c = Arc::new(Completion::AppCompletion(AppCompletion::new_accept(waker)));
         self.server_socket.accept(c.clone())?; // todo, change api so c is still kept, thus result
+        self.completion = Some(c);
         println!("submitted accept completion from accept program");
         Ok(())
     }
