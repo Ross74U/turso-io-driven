@@ -3,7 +3,7 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use turso_io::{
     IoBuilder,
-    io::{completion::Completion, generic::IO, io_uring::UringIO, runtime::Runtime},
+    io::{completion::AppCompletion, generic::IO, io_uring::UringIO, runtime::Runtime},
 };
 
 const DB_FILE: &str = "database.db";
@@ -27,9 +27,7 @@ fn main() {
 
     let listener = TcpListener::bind("127.0.0.1:8000").unwrap();
     listener.set_nonblocking(true).unwrap();
-
     let rt = Runtime::new();
-
     let server_socket = io.register_listener(listener).unwrap();
     let p = rt.new_accept(server_socket);
     rt.queue(p);

@@ -1,6 +1,6 @@
 #![allow(clippy::arc_with_non_send_sync)]
-
-use crate::io::completion::SharedCompletion;
+use crate::io::completion::{SharedCompletion, AppCompletion};
+use crate::unwrap_completion;
 
 use super::completion::Completion;
 use super::generic::{IO, ServerSocket};
@@ -1006,15 +1006,22 @@ pub struct UringServerSocket {
 impl ServerSocket for UringServerSocket {
     fn accept(&self, c: SharedCompletion) -> anyhow::Result<()> {
         let fd = io_uring::types::Fixed(self.id);
-        let mut addr: libc::sockaddr = unsafe { std::mem::zeroed() };
-        let mut addrlen = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-        // TODO: this is a UAF rn, just testing, relax
-        let ring_entry =
-            io_uring::opcode::Accept::new(fd, &mut addr as *mut _, &mut addrlen as *mut _)
-                .build()
-                .user_data(get_key_from_completion(c));
+        unwrap_completion!(
+            c == AppCompletion::Accept,
+            |acceptc| { 
+                unsafe {
+                    let addr = &mut *acceptc.addr.get();
+                    let addrlen = &mut *acceptc.addrlen.get();
+                    let ring_entry =
+                        io_uring::opcode::Accept::new(fd, addr as *mut _, addrlen as *mut _)
+                            .build()
+                            .user_data(get_key_from_completion(c));
+                    self.io.lock().ring.submit_entry(&ring_entry);
+                }
+            },
+            { unreachable!("ServerSocket::accept must be called on an AcceptCompletion") }
+        );
 
-        self.io.lock().ring.submit_entry(&ring_entry);
         Ok(())
     }
 }

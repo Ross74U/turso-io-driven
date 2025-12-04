@@ -1,14 +1,26 @@
+#![allow(clippy::arc_with_non_send_sync)]
+
 use crate::io::completion::{Completion, SharedCompletion};
 use crate::io::{completion::AppCompletion, generic::ServerSocket};
+use crate::unwrap_completion;
+
 use anyhow::Result;
 use crossbeam::queue::ArrayQueue;
 use std::cell::RefCell;
 use std::sync::Arc;
 
+
 pub struct Runtime<'rt> {
     programs: RefCell<slab::Slab<Box<Program<'rt>>>>,
     run_queue: ArrayQueue<usize>,
 }
+
+impl<'rt> Default for Runtime<'rt> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'rt> Runtime<'rt> {
     pub fn new() -> Self {
         Runtime {
@@ -84,26 +96,25 @@ pub struct AcceptProgram<'a> {
 impl<'a> AcceptProgram<'a> {
     fn step(&mut self, waker: ProgramWaker<'a>) -> Result<()> {
         if let Some(c) = self.completion.as_ref() {
-            match c.as_ref() {
-                Completion::AppCompletion(c) => match c {
-                    AppCompletion::Accept(c) => {
-                        println!("c result: {:?}", c.result)
-                    }
-                    _ => unreachable!("completion should be accept"),
+            unwrap_completion!(
+                c == AppCompletion::Accept,
+                |c| { 
+                    println!(
+                        "accept completion result {:?} {:?} {:?}",
+                        c.result(), c.addr(), c.addrlen()
+                    ) 
                 },
-                _ => {
-                    unreachable!("completion should be accept")
-                }
-            }
+                { unreachable!() }
+            );
         }
 
         let c = Arc::new(Completion::AppCompletion(AppCompletion::new_accept(waker)));
         self.server_socket.accept(c.clone())?; // todo, change api so c is still kept, thus result
         self.completion = Some(c);
-        println!("submitted accept completion from accept program");
         Ok(())
     }
-    fn parent(&self) -> &'a Runtime {
+
+    fn parent(&self) -> &'a Runtime<'a> {
         self.parent
     }
 }
