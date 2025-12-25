@@ -1,9 +1,8 @@
 #![allow(clippy::arc_with_non_send_sync)]
-use crate::io::completion::{SharedCompletion, AppCompletion};
+use crate::io::completion::{Completion, SharedCompletion, AppCompletion};
 use crate::unwrap_completion;
 
-use super::completion::Completion;
-use super::generic::{IO, ServerSocket};
+use crate::io::generic::{IO, ServerSocket, ClientConnection};
 
 use parking_lot::Mutex;
 use rustix::fs::{self, FlockOperation, OFlags};
@@ -58,7 +57,7 @@ const MAX_IOVEC_ENTRIES: usize = CKPT_BATCH_PAGES;
 /// Maximum number of I/O operations to wait for in a single run,
 /// waiting for > 1 can reduce the amount of `io_uring_enter` syscalls we
 /// make, but can increase single operation latency.
-const MAX_WAIT: usize = 4;
+const MAX_WAIT: usize = 1;
 
 /// One memory arena for DB pages and another for WAL frames
 const ARENA_COUNT: usize = 2;
@@ -125,6 +124,50 @@ impl IovecPool {
     }
 }
 
+fn fd_is_open(fd: i32) -> bool {
+    unsafe { libc::fcntl(fd, libc::F_GETFD) != -1 }
+}
+fn fd_is_socket(fd: i32) -> bool {
+    let mut ty: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            &mut ty as *mut _ as *mut _,
+            &mut len,
+        )
+    };
+    rc == 0
+}
+fn fd_peek(fd: i32) {
+    let mut b = [0u8; 1];
+    unsafe {
+        let n = libc::recv(fd, b.as_mut_ptr() as *mut _, 1,
+                           libc::MSG_PEEK | libc::MSG_DONTWAIT);
+        if n == -1 {
+            let e = *libc::__errno_location();
+            eprintln!("peek: n=-1 errno={e}");
+        } else {
+            eprintln!("peek: n={n} (ok)");
+        }
+    }
+}
+fn fd_poll(fd: i32) {
+    unsafe {
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let rc = libc::poll(&mut pfd, 1, 0); // 0ms: non-blocking
+        let e = *libc::__errno_location();
+        eprintln!("poll rc={rc} revents=0x{:x} errno={e}", pfd.revents);
+    }
+}
+
+
 impl UringIO {
     pub fn new() -> Result<Self> {
         let ring = match io_uring::IoUring::builder()
@@ -163,7 +206,6 @@ impl UringIO {
     }
 
     fn step(&self) -> Result<()> {
-        trace!("step()");
         let mut inner = self.inner.lock();
         let ring = &mut inner.ring;
         ring.flush_overflow()?;
@@ -987,12 +1029,25 @@ impl IO for UringIO {
         &self,
         listener: std::net::TcpListener,
     ) -> anyhow::Result<Arc<dyn ServerSocket>> {
+        
         let id = self.inner.lock().register_file(listener.as_raw_fd())?; // here we fail if there
-        // are no open file slots, but in the future we should resort registering dynamically
+        // TODO: are no open file slots, but in the future we should resort registering dynamically
         Ok(Arc::new(UringServerSocket {
             io: self.inner.clone(),
             listener,
-            id,
+            fixed_id: id,
+        }))
+    }
+    
+    /// register a std::net::TcpStream to obtain a UringClientConnection
+    /// it is up to the user to ensure nonblocking is set
+    fn register_connection(
+        &self,
+        fd: i32 
+    ) -> anyhow::Result<Arc<dyn super::generic::ClientConnection>> {
+        Ok(Arc::new(UringClientConnection {
+            io: self.inner.clone(),
+            fd,
         }))
     }
 }
@@ -1000,12 +1055,12 @@ impl IO for UringIO {
 pub struct UringServerSocket {
     io: Arc<Mutex<InnerUringIO>>,
     listener: std::net::TcpListener,
-    id: u32, // fixed id; we can make this optional if we choose to not preregister the file
+    fixed_id: u32, // fixed id; we can make this optional if we choose to not preregister the file
 }
 
 impl ServerSocket for UringServerSocket {
     fn accept(&self, c: SharedCompletion) -> anyhow::Result<()> {
-        let fd = io_uring::types::Fixed(self.id);
+        let fd = io_uring::types::Fixed(self.fixed_id);
         unwrap_completion!(
             c == AppCompletion::Accept,
             |acceptc| { 
@@ -1022,6 +1077,29 @@ impl ServerSocket for UringServerSocket {
             { unreachable!("ServerSocket::accept must be called on an AcceptCompletion") }
         );
 
+        Ok(())
+    }
+}
+
+pub struct UringClientConnection {
+    io: Arc<Mutex<InnerUringIO>>,
+    fd: i32,
+}
+
+impl ClientConnection for UringClientConnection {
+    fn recv(&self, c: SharedCompletion) -> anyhow::Result<()> {
+        unwrap_completion!(
+            c == AppCompletion::Recv,
+            |recvc| {
+                let fd = io_uring::types::Fd(self.fd);
+                let sqe = io_uring::opcode::Recv::new(fd, recvc.buf_mut().as_mut_ptr(), recvc.buf().len() as _)
+                    .build()
+                    .user_data(get_key_from_completion(c));
+
+                self.io.lock().ring.submit_entry(&sqe);
+            },
+            { unreachable!("ClientConnection::recv must be called on an RecvCompletion") }
+        );
         Ok(())
     }
 }

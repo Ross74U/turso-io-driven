@@ -1,36 +1,52 @@
 #![allow(clippy::arc_with_non_send_sync)]
-
 use crate::io::completion::{Completion, SharedCompletion};
+use crate::io::generic::{ClientConnection, IO};
 use crate::io::{completion::AppCompletion, generic::ServerSocket};
 use crate::unwrap_completion;
 
 use anyhow::Result;
 use crossbeam::queue::ArrayQueue;
+use rustix::path::Arg;
 use std::cell::RefCell;
 use std::sync::Arc;
+use tracing::{info};
 
+struct ProgramsStorage<'a> (slab::Slab<Option<Box<Program<'a>>>>);
+impl<'a> ProgramsStorage<'a> {
+    fn new(capacity: usize) -> Self {
+        Self(slab::Slab::with_capacity(capacity))
+    }
+    fn take(&mut self, id: usize) -> Option<Box<Program<'a>>> {
+        self.0[id].take()
+    }
+    fn set(&mut self, id: usize, p: Box<Program<'a>>) {
+        self.0[id] = Some(p);
+    }
+    fn insert(&mut self, p: Box<Program<'a>>) -> usize {
+        self.0.insert(Some(p))
+    }
+}
 
 pub struct Runtime<'rt> {
-    programs: RefCell<slab::Slab<Box<Program<'rt>>>>,
+    io: Arc<dyn IO>,
+    programs: RefCell<ProgramsStorage<'rt>>,
     run_queue: ArrayQueue<usize>,
 }
 
-impl<'rt> Default for Runtime<'rt> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl<'rt> Runtime<'rt> {
-    pub fn new() -> Self {
+    pub fn new(io: Arc<dyn IO>) -> Self {
         Runtime {
-            programs: RefCell::new(slab::Slab::with_capacity(128)),
+            io,
+            programs: RefCell::new(ProgramsStorage::new(128)),
             run_queue: ArrayQueue::new(128),
         }
     }
+    
+    pub fn io(&self) -> Arc<dyn IO> {
+        self.io.clone()
+    }
 
     pub fn step(&'rt self) -> Result<()> {
-        let mut programs = self.programs.borrow_mut();
         loop {
             let Some(id) = self.run_queue.pop() else {
                 break;
@@ -39,11 +55,18 @@ impl<'rt> Runtime<'rt> {
                 program_id: id,
                 run_queue: &self.run_queue,
             };
-            let Some(p) = programs.get_mut(id) else {
-                continue;
+            
+            let mut p = {
+                let mut programs = self.programs.borrow_mut();
+                let Some(p) = programs.take(id) else {continue};
+                p
             };
-            p.step(waker)?;
+
+            p.step(waker, &mut self.programs.borrow_mut())?;
+            
+            self.programs.borrow_mut().set(id, p);
         }
+        println!("Finished rt step");
         Ok(())
     }
 
@@ -55,6 +78,14 @@ impl<'rt> Runtime<'rt> {
             completion: None,
         }));
         self.programs.borrow_mut().insert(p)
+    }
+
+    pub fn new_client_handler(&'rt self, conn: Arc<dyn ClientConnection>) -> Box<Program<'rt>> {
+        Box::new(Program::HandleClient(HandleClientProgram {
+            conn,
+            parent: self,
+            completion: None,
+        }))
     }
 
     pub fn queue(&self, id: usize) {
@@ -74,16 +105,19 @@ impl<'rt> Runtime<'rt> {
 
 pub enum Program<'a> {
     Accept(AcceptProgram<'a>),
+    HandleClient(HandleClientProgram<'a>),
 }
 impl<'a> Program<'a> {
-    fn step(&mut self, waker: ProgramWaker<'a>) -> Result<()> {
+    fn step(&mut self, waker: ProgramWaker<'a>, programs: &mut ProgramsStorage<'a>) -> Result<()> {
         match self {
-            Self::Accept(s) => s.step(waker),
+            Self::Accept(s) => s.step(waker, programs),
+            Self::HandleClient(s) => s.step(waker),
         }
     }
     fn parent(&'a self) -> &'a Runtime<'a> {
         match self {
             Self::Accept(s) => s.parent(),
+            Self::HandleClient(s) => s.parent(),
         }
     }
 }
@@ -94,23 +128,77 @@ pub struct AcceptProgram<'a> {
     completion: Option<SharedCompletion<'a>>,
 }
 impl<'a> AcceptProgram<'a> {
-    fn step(&mut self, waker: ProgramWaker<'a>) -> Result<()> {
+    fn step(&mut self, waker: ProgramWaker<'a>, programs: &mut ProgramsStorage<'a>) -> Result<()> {
         if let Some(c) = self.completion.as_ref() {
             unwrap_completion!(
                 c == AppCompletion::Accept,
                 |c| { 
-                    println!(
+                    info!(
                         "accept completion result {:?} {:?} {:?}",
-                        c.result(), c.addr(), c.addrlen()
-                    ) 
+                        c.result(), c.sockaddr(), c.addrlen()
+                    );
+                    
+                    match c.sockaddr().sa_family as i32 {
+                        libc::AF_INET => {},
+                        _ => panic!("only support IPv4")
+                    }
+
+                    // create RecvProgram here to handle the client 
+                    let conn = {
+                        let Some(fd) = c.result() else { panic!("None result from accept cqe") };
+                        self.parent().io().register_connection(fd)?
+                    };
+                    let handler_program = self.parent().new_client_handler(conn);
+                    let new_id = programs.insert(handler_program);
+                    self.parent().queue(new_id);
                 },
                 { unreachable!() }
             );
         }
 
         let c = Arc::new(Completion::AppCompletion(AppCompletion::new_accept(waker)));
-        self.server_socket.accept(c.clone())?; // todo, change api so c is still kept, thus result
+        self.server_socket.accept(c.clone())?;
         self.completion = Some(c);
+        Ok(())
+    }
+
+    fn parent(&self) -> &'a Runtime<'a> {
+        self.parent
+    }
+}
+
+pub struct HandleClientProgram<'a> {
+    conn: Arc<dyn ClientConnection>,
+    parent: &'a Runtime<'a>, // parent runtime
+    completion: Option<SharedCompletion<'a>>,
+}
+
+impl<'a> HandleClientProgram<'a> {
+    fn step(&mut self, waker: ProgramWaker<'a>) -> Result<()> {
+        let mut eof = false;
+
+        if let Some(c) = self.completion.as_ref() {
+            unwrap_completion!(
+                c == AppCompletion::Recv,
+                |c| { 
+                    info!("recv result: {:?}", c.result());
+                    info!("recv text: {}", c.buf().to_string_lossy());
+                    if c.result() == Some(0) {
+                        eof = true;
+                    }
+                },
+                { unreachable!() }
+            );
+        }
+
+        if eof {
+            // TODO: cleanup (close fd, remove self from programs)
+            return Ok(());
+        }
+         
+        let new_c = Arc::new(Completion::AppCompletion(AppCompletion::new_recv(waker, 64)));
+        self.conn.recv(new_c.clone())?;
+        self.completion = Some(new_c);
         Ok(())
     }
 

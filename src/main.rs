@@ -3,8 +3,9 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use turso_io::{
     IoBuilder,
-    io::{completion::AppCompletion, generic::IO, io_uring::UringIO, runtime::Runtime},
+    io::{generic::IO, io_uring::UringIO, runtime::Runtime},
 };
+use tracing_subscriber;
 
 const DB_FILE: &str = "database.db";
 
@@ -14,6 +15,8 @@ const SQL_CREATE_TABLE: &str = "CREATE TABLE IF NOT EXISTS users (
     )";
 
 fn main() {
+    tracing_subscriber::fmt::init();
+
     let mut io = Arc::new(UringIO::new().unwrap());
 
     let builder = IoBuilder::new_local_with_io(DB_FILE, io.clone());
@@ -27,18 +30,16 @@ fn main() {
 
     let listener = TcpListener::bind("127.0.0.1:8000").unwrap();
     listener.set_nonblocking(true).unwrap();
-    let rt = Runtime::new();
+    let rt = Runtime::new(io.clone());
     let server_socket = io.register_listener(listener).unwrap();
     let p = rt.new_accept(server_socket);
     rt.queue(p);
 
     loop {
         if let Err(err) = rt.step() {
-            // step triggers wakers
             dbg!("Err during rt step: {:?}", err);
         };
         if let Err(err) = io.step() {
-            // step triggers wakers
             dbg!("Err during io step: {:?}", err);
         };
     }
@@ -55,7 +56,6 @@ fn execute_until_done(mut stmt: turso_core::Statement, io: &mut Arc<impl IO>) ->
                 return Ok(changes as u64);
             }
             Ok(turso_core::StepResult::IO) => {
-                println!("io");
                 io.step().unwrap();
             }
             Ok(turso_core::StepResult::Busy) => {
