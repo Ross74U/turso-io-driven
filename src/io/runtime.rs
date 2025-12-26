@@ -52,7 +52,7 @@ impl<'rt> Runtime<'rt> {
                 break;
             };
             let waker = ProgramWaker {
-                program_id: id,
+                program_id: Some(id),
                 run_queue: &self.run_queue,
             };
             
@@ -176,6 +176,7 @@ pub struct HandleClientProgram<'a> {
 impl<'a> HandleClientProgram<'a> {
     fn step(&mut self, waker: ProgramWaker<'a>) -> Result<()> {
         let mut eof = false;
+        let mut text_buf = Vec::new();
 
         if let Some(c) = self.completion.as_ref() {
             unwrap_completion!(
@@ -185,10 +186,19 @@ impl<'a> HandleClientProgram<'a> {
                     info!("recv text: {}", c.buf().to_string_lossy());
                     if c.result() == Some(0) {
                         eof = true;
+                    } else {
+                        text_buf = c.buf().to_owned();
                     }
                 },
                 { unreachable!() }
             );
+        }
+        
+        if !text_buf.is_empty() {
+            // echo text back with no callback on completion
+            let null_waker = ProgramWaker { program_id: None, run_queue: &self.parent().run_queue };
+            let sendc = Arc::new(Completion::AppCompletion(AppCompletion::new_send(null_waker, text_buf)));
+            self.conn.send(sendc.clone())?;
         }
 
         if eof {
@@ -196,9 +206,9 @@ impl<'a> HandleClientProgram<'a> {
             return Ok(());
         }
          
-        let new_c = Arc::new(Completion::AppCompletion(AppCompletion::new_recv(waker, 64)));
-        self.conn.recv(new_c.clone())?;
-        self.completion = Some(new_c);
+        let recvc = Arc::new(Completion::AppCompletion(AppCompletion::new_recv(waker, 64)));
+        self.conn.recv(recvc.clone())?;
+        self.completion = Some(recvc);
         Ok(())
     }
 
@@ -211,14 +221,17 @@ pub trait Waker<'a> {
     fn wake_by_ref(&'a self) {}
 }
 
+#[derive(Clone)]
 pub struct ProgramWaker<'a> {
-    program_id: usize,
+    program_id: Option<usize>,
     run_queue: &'a ArrayQueue<usize>,
 }
 
 impl<'a> Waker<'a> for ProgramWaker<'a> {
     fn wake_by_ref(&'a self) {
         // TODO: handle full run queue better
-        self.run_queue.force_push(self.program_id);
+        if let Some(id) = self.program_id{
+            self.run_queue.force_push(id);
+        }
     }
 }

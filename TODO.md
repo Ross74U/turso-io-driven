@@ -6,4 +6,8 @@ our own completion variant without patching turso_core too much
 
 - [x] impl basic async logic with custom enums (tcp server)
 
-- [ ] impl custom lifetime based waker (nonstd) and run queue (crossbeam)
+- [x] impl custom lifetime based waker (nonstd) and run queue (crossbeam)
+ 
+- [x] impl send program
+
+- [ ] impl basic tcp protocol for messaging (websocket with handshake?)

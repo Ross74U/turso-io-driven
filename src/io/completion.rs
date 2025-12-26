@@ -47,6 +47,15 @@ impl<'a> AppCompletion<'a> {
         Self::Recv(c)
     }
 
+    pub fn new_send(waker: ProgramWaker<'a>, buf: Vec<u8>) -> Self {
+        let c = SendCompletion {
+            waker,
+            result: UnsafeCell::new(None),
+            buf: UnsafeCell::new(buf)
+        };
+        Self::Send(c)
+    }
+
     pub fn callback(&self, result: i32) {
         match self {
             Self::Accept(c) => c.callback(result),
@@ -87,7 +96,7 @@ impl<'a> AcceptCompletion<'a> {
 pub struct RecvCompletion<'a> {
     waker: ProgramWaker<'a>,
     result: UnsafeCell<Option<i32>>,
-    pub buf: UnsafeCell<Vec<u8>>
+    buf: UnsafeCell<Vec<u8>>
 }
 impl<'a> RecvCompletion<'a> {
     fn callback(&self, result: i32) {
@@ -113,6 +122,7 @@ impl<'a> RecvCompletion<'a> {
 pub struct SendCompletion<'a> {
     waker: ProgramWaker<'a>,
     result: UnsafeCell<Option<i32>>,
+    buf: UnsafeCell<Vec<u8>>
 }
 impl<'a> SendCompletion<'a> {
     fn callback(&self, result: i32) {
@@ -125,5 +135,9 @@ impl<'a> SendCompletion<'a> {
 
     pub fn result(&self) -> Option<i32>{
         unsafe { *self.result.get() } 
+    }
+    
+    pub fn buf_mut(&self) -> &mut Vec<u8>{
+        unsafe { &mut *self.buf.get() as &mut _} 
     }
 }

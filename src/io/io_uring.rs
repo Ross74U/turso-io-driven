@@ -1,5 +1,4 @@
-#![allow(clippy::arc_with_non_send_sync)]
-use crate::io::completion::{Completion, SharedCompletion, AppCompletion};
+#![allow(clippy::arc_with_non_send_sync)] use crate::io::completion::{Completion, SharedCompletion, AppCompletion};
 use crate::unwrap_completion;
 
 use crate::io::generic::{IO, ServerSocket, ClientConnection};
@@ -20,6 +19,7 @@ use turso_core::{
     Clock, Completion as TursoCompletion, File, IO as TursoIO, Instant, LimboError, OpenFlags,
     Result, turso_assert,
 };
+use io_uring::opcode;
 
 pub struct SysClock;
 impl Clock for SysClock {
@@ -57,7 +57,8 @@ const MAX_IOVEC_ENTRIES: usize = CKPT_BATCH_PAGES;
 /// Maximum number of I/O operations to wait for in a single run,
 /// waiting for > 1 can reduce the amount of `io_uring_enter` syscalls we
 /// make, but can increase single operation latency.
-const MAX_WAIT: usize = 1;
+const MAX_WAIT: usize = 1; // TODO: refactor to support excluding certain operations (i.e.
+// accepting connections from contributing to pending_ops) 
 
 /// One memory arena for DB pages and another for WAL frames
 const ARENA_COUNT: usize = 2;
@@ -1045,10 +1046,7 @@ impl IO for UringIO {
         &self,
         fd: i32 
     ) -> anyhow::Result<Arc<dyn super::generic::ClientConnection>> {
-        Ok(Arc::new(UringClientConnection {
-            io: self.inner.clone(),
-            fd,
-        }))
+        Ok(Arc::new(UringClientConnection { io: self.inner.clone(), fd, }))
     }
 }
 
@@ -1067,11 +1065,10 @@ impl ServerSocket for UringServerSocket {
                 unsafe {
                     let addr = &mut *acceptc.addr.get();
                     let addrlen = &mut *acceptc.addrlen.get();
-                    let ring_entry =
-                        io_uring::opcode::Accept::new(fd, addr as *mut _, addrlen as *mut _)
+                    let sqe = opcode::Accept::new(fd, addr as *mut _, addrlen as *mut _)
                             .build()
                             .user_data(get_key_from_completion(c));
-                    self.io.lock().ring.submit_entry(&ring_entry);
+                    self.io.lock().ring.submit_entry(&sqe);
                 }
             },
             { unreachable!("ServerSocket::accept must be called on an AcceptCompletion") }
@@ -1092,13 +1089,29 @@ impl ClientConnection for UringClientConnection {
             c == AppCompletion::Recv,
             |recvc| {
                 let fd = io_uring::types::Fd(self.fd);
-                let sqe = io_uring::opcode::Recv::new(fd, recvc.buf_mut().as_mut_ptr(), recvc.buf().len() as _)
+                let sqe = opcode::Recv::new(fd, recvc.buf_mut().as_mut_ptr(), recvc.buf().len() as _)
                     .build()
                     .user_data(get_key_from_completion(c));
 
                 self.io.lock().ring.submit_entry(&sqe);
             },
             { unreachable!("ClientConnection::recv must be called on an RecvCompletion") }
+        );
+        Ok(())
+    }
+
+    fn send(&self, c: SharedCompletion) -> anyhow::Result<()> {
+        unwrap_completion!(
+            c == AppCompletion::Send,
+            |sendc| {
+                let fd = io_uring::types::Fd(self.fd);
+                let buf = sendc.buf_mut();
+                let sqe = opcode::Send::new(fd, buf.as_ptr(), buf.len() as u32)
+                    .build()
+                    .user_data(get_key_from_completion(c));
+                self.io.lock().ring.submit_entry(&sqe);
+            },
+            { unreachable!("ClientConnection::send must be called on an SendCompletion") }
         );
         Ok(())
     }
