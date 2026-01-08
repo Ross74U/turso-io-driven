@@ -1,4 +1,4 @@
-use super::runtime::{ProgramWaker, Waker};
+use super::runtime::ProgramWaker;
 use std::cell::UnsafeCell;
 use std::sync::Arc;
 use turso_core::Completion as TursoCompletion;

@@ -22,8 +22,17 @@ impl<'a> ProgramsStorage<'a> {
     fn set(&mut self, id: usize, p: Box<Program<'a>>) {
         self.0[id] = Some(p);
     }
+    fn try_set(&mut self, id: usize, p: Box<Program<'a>>) {
+        if self.0.contains(id) {
+            self.0[id] = Some(p);
+        }
+    }
     fn insert(&mut self, p: Box<Program<'a>>) -> usize {
         self.0.insert(Some(p))
+    }
+    fn remove(&mut self, id: usize) -> Option<Box<Program<'a>>> {
+        dbg!(id);
+        self.0.remove(id)
     }
 }
 
@@ -44,7 +53,7 @@ impl<'rt> Runtime<'rt> {
     
     pub fn io(&self) -> Arc<dyn IO> {
         self.io.clone()
-    }
+    } 
 
     pub fn step(&'rt self) -> Result<()> {
         loop {
@@ -62,9 +71,10 @@ impl<'rt> Runtime<'rt> {
                 p
             };
 
-            p.step(waker, &mut self.programs.borrow_mut())?;
+            p.step(waker)?;
             
-            self.programs.borrow_mut().set(id, p);
+            self.programs.borrow_mut().try_set(id, p); // use safe try set here in case the program
+            // removes itself from programs during it's own step
         }
         println!("Finished rt step");
         Ok(())
@@ -91,15 +101,14 @@ impl<'rt> Runtime<'rt> {
     pub fn queue(&self, id: usize) {
         self.run_queue.force_push(id);
     }
-
-    /// get a readable reference to a program
-    pub fn get_program(&self, id: usize) -> &'rt Program<'rt> {
-        todo!();
+    
+    pub fn register(&self, p: Box<Program<'rt>>) -> usize {
+        self.programs.borrow_mut().insert(p)
     }
 
     /// Removes a program from the tasks slab
-    pub fn deregister(&mut self) -> usize {
-        todo!();
+    pub fn deregister(&self, id: usize) {
+        self.programs.borrow_mut().remove(id);
     }
 }
 
@@ -108,9 +117,9 @@ pub enum Program<'a> {
     HandleClient(HandleClientProgram<'a>),
 }
 impl<'a> Program<'a> {
-    fn step(&mut self, waker: ProgramWaker<'a>, programs: &mut ProgramsStorage<'a>) -> Result<()> {
+    fn step(&mut self, waker: ProgramWaker<'a>) -> Result<()> {
         match self {
-            Self::Accept(s) => s.step(waker, programs),
+            Self::Accept(s) => s.step(waker),
             Self::HandleClient(s) => s.step(waker),
         }
     }
@@ -128,7 +137,7 @@ pub struct AcceptProgram<'a> {
     completion: Option<SharedCompletion<'a>>,
 }
 impl<'a> AcceptProgram<'a> {
-    fn step(&mut self, waker: ProgramWaker<'a>, programs: &mut ProgramsStorage<'a>) -> Result<()> {
+    fn step(&mut self, waker: ProgramWaker<'a>) -> Result<()> {
         if let Some(c) = self.completion.as_ref() {
             unwrap_completion!(
                 c == AppCompletion::Accept,
@@ -149,7 +158,7 @@ impl<'a> AcceptProgram<'a> {
                         self.parent().io().register_connection(fd)?
                     };
                     let handler_program = self.parent().new_client_handler(conn);
-                    let new_id = programs.insert(handler_program);
+                    let new_id = self.parent().register(handler_program);
                     self.parent().queue(new_id);
                 },
                 { unreachable!() }
@@ -203,6 +212,9 @@ impl<'a> HandleClientProgram<'a> {
 
         if eof {
             // TODO: cleanup (close fd, remove self from programs)
+            if let Some(id) = waker.id() {
+                self.parent().deregister(id);
+            }
             return Ok(());
         }
          
@@ -217,18 +229,18 @@ impl<'a> HandleClientProgram<'a> {
     }
 }
 
-pub trait Waker<'a> {
-    fn wake_by_ref(&'a self) {}
-}
-
 #[derive(Clone)]
 pub struct ProgramWaker<'a> {
     program_id: Option<usize>,
     run_queue: &'a ArrayQueue<usize>,
 }
 
-impl<'a> Waker<'a> for ProgramWaker<'a> {
-    fn wake_by_ref(&'a self) {
+impl<'a> ProgramWaker<'a> {
+    pub fn id(&self) -> Option<usize> {
+        self.program_id
+    }
+
+    pub fn wake_by_ref(&'a self) {
         // TODO: handle full run queue better
         if let Some(id) = self.program_id{
             self.run_queue.force_push(id);
