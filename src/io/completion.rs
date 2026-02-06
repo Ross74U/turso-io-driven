@@ -1,4 +1,4 @@
-use super::runtime::ProgramWaker;
+use crate::runtime::ProgramWaker;
 use std::cell::UnsafeCell;
 use std::sync::Arc;
 use turso_core::Completion as TursoCompletion;
@@ -12,21 +12,21 @@ macro_rules! unwrap_completion {
     };
 }
 
-pub type SharedCompletion<'a> = Arc<Completion<'a>>;
+pub type SharedCompletion = Arc<Completion>;
 
-pub enum Completion<'a> {
+pub enum Completion {
     TursoCompletion(TursoCompletion),
-    AppCompletion(AppCompletion<'a>),
+    AppCompletion(AppCompletion),
 }
 
-pub enum AppCompletion<'a> {
-    Accept(AcceptCompletion<'a>),
-    Recv(RecvCompletion<'a>),
-    Send(SendCompletion<'a>),
+pub enum AppCompletion {
+    Accept(AcceptCompletion),
+    Recv(RecvCompletion),
+    Send(SendCompletion),
 }
 
-impl<'a> AppCompletion<'a> {
-    pub fn new_accept(waker: ProgramWaker<'a>) -> Self {
+impl AppCompletion {
+    pub fn new_accept(waker: ProgramWaker) -> Self {
         let addr: libc::sockaddr = unsafe { std::mem::zeroed() };
         let addrlen = std::mem::size_of::<libc::sockaddr>() as libc::socklen_t;
         let c = AcceptCompletion {
@@ -38,7 +38,7 @@ impl<'a> AppCompletion<'a> {
         Self::Accept(c)
     }
 
-    pub fn new_recv(waker: ProgramWaker<'a>, len: usize) -> Self {
+    pub fn new_recv(waker: ProgramWaker, len: usize) -> Self {
         let c = RecvCompletion {
             waker,
             result: UnsafeCell::new(None),
@@ -47,7 +47,7 @@ impl<'a> AppCompletion<'a> {
         Self::Recv(c)
     }
 
-    pub fn new_send(waker: ProgramWaker<'a>, buf: Vec<u8>) -> Self {
+    pub fn new_send(waker: ProgramWaker, buf: Vec<u8>) -> Self {
         let c = SendCompletion {
             waker,
             result: UnsafeCell::new(None),
@@ -65,8 +65,8 @@ impl<'a> AppCompletion<'a> {
     }
 }
 
-pub struct AcceptCompletion<'a> {
-    waker: ProgramWaker<'a>,
+pub struct AcceptCompletion {
+    waker: ProgramWaker,
     result: UnsafeCell<Option<i32>>,
     pub addr: UnsafeCell<libc::sockaddr>,
     pub addrlen: UnsafeCell<libc::socklen_t>
@@ -74,7 +74,7 @@ pub struct AcceptCompletion<'a> {
 
 // Aliasing: callback(), result(), addr(), and addrlen() will only be called once the
 // completion has finished, meaning there shouldn't be any refs into the UnsafeCells
-impl<'a> AcceptCompletion<'a> {
+impl AcceptCompletion {
     fn callback(&self, result: i32) {
         unsafe {
             let r = &mut *self.result.get();
@@ -93,12 +93,12 @@ impl<'a> AcceptCompletion<'a> {
     }
 }
 
-pub struct RecvCompletion<'a> {
-    waker: ProgramWaker<'a>,
+pub struct RecvCompletion {
+    waker: ProgramWaker,
     result: UnsafeCell<Option<i32>>,
     buf: UnsafeCell<Vec<u8>>
 }
-impl<'a> RecvCompletion<'a> {
+impl RecvCompletion {
     fn callback(&self, result: i32) {
         unsafe {
             let r = &mut *self.result.get();
@@ -119,12 +119,12 @@ impl<'a> RecvCompletion<'a> {
     }
 }
 
-pub struct SendCompletion<'a> {
-    waker: ProgramWaker<'a>,
+pub struct SendCompletion {
+    waker: ProgramWaker,
     result: UnsafeCell<Option<i32>>,
     buf: UnsafeCell<Vec<u8>>
 }
-impl<'a> SendCompletion<'a> {
+impl SendCompletion {
     fn callback(&self, result: i32) {
         unsafe {
             let r = &mut *self.result.get();
