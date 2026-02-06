@@ -2,8 +2,7 @@ use anyhow::{Result, bail};
 use std::net::TcpListener;
 use std::sync::Arc;
 use turso_io::{
-    IoBuilder,
-    io::{generic::IO, io_uring::UringIO, runtime::Runtime},
+    io::{generic::IO, io_uring::UringIO}, runtime::{http, Runtime, RuntimeInner}, IoBuilder
 };
 use tracing_subscriber;
 
@@ -30,10 +29,11 @@ fn main() {
 
     let listener = TcpListener::bind("127.0.0.1:8000").unwrap();
     listener.set_nonblocking(true).unwrap();
-    let rt = Runtime::new(io.clone());
+    let rt = RuntimeInner::new(io.clone());
     let server_socket = io.register_listener(listener).unwrap();
-    let p = rt.new_accept(server_socket);
-    rt.queue(p);
+    let p = http::HttpServer::new(server_socket, rt.clone());
+    let pid = rt.register(p);
+    rt.queue(pid);
 
     loop {
         if let Err(err) = rt.step() {

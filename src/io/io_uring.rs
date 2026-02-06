@@ -792,7 +792,7 @@ fn get_key_from_completion(c: Arc<Completion>) -> u64 {
 }
 
 #[inline(always)]
-fn wrapped_completion_from_key<'a>(key: u64) -> Arc<Completion<'a>> {
+fn wrapped_completion_from_key<'a>(key: u64) -> Arc<Completion> {
     unsafe { Arc::from_raw(key as *const Completion) }
 }
 
