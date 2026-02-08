@@ -69,6 +69,7 @@ const BARRIER_USER_DATA: u64 = 1;
 
 /// user_data tag for cancellation operations
 const CANCEL_TAG: u64 = 1;
+const BLANK_TAG: u64 = 2;
 
 pub struct UringIO {
     pub inner: Arc<Mutex<InnerUringIO>>,
@@ -222,6 +223,10 @@ impl UringIO {
             let user_data = cqe.user_data();
             if user_data == CANCEL_TAG {
                 // ignore if this is a cancellation CQE
+                continue;
+            }
+            if user_data == BLANK_TAG {
+                // no callback (fire and forget completions)
                 continue;
             }
             let result = cqe.result();
@@ -1113,6 +1118,14 @@ impl ClientConnection for UringClientConnection {
             },
             { unreachable!("ClientConnection::send must be called on an SendCompletion") }
         );
+        Ok(())
+    }
+   
+    /// closes the fd via a close opcade (we don't take a completion so no callback)
+    fn close(&self) -> anyhow::Result<()> {
+        let fd = io_uring::types::Fd(self.fd);
+        let sqe = opcode::Close::new(fd).build().user_data(BLANK_TAG);
+        self.io.lock().ring.submit_entry(&sqe);
         Ok(())
     }
 }

@@ -1,6 +1,4 @@
 use anyhow::Result;
-use libc::{close, CLONE_SETTLS};
-use std::future::Pending;
 use std::sync::Arc;
 use super::{Runtime, Program, ProgramWaker, unwrap_completion};
 use crate::io::completion::{Completion, SharedCompletion, AppCompletion};
@@ -88,6 +86,7 @@ impl HandleHttpClient {
         if let Some(id) = waker.id() {
             self.parent.deregister(id);
         }
+        self.conn.close().unwrap();
     }
 }
  
