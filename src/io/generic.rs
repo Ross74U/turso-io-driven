@@ -29,4 +29,5 @@ pub trait ServerSocket {
 pub trait ClientConnection {
     fn recv(&self, c: SharedCompletion) -> anyhow::Result<()> { todo!() }
     fn send(&self, c: SharedCompletion) -> anyhow::Result<()> { todo!() }
+    fn close(&self) -> anyhow::Result<()> { todo!() }
 }

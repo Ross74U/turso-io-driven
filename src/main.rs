@@ -1,8 +1,9 @@
 use anyhow::{Result, bail};
+use tracing::error;
 use std::net::TcpListener;
 use std::sync::Arc;
 use turso_io::{
-    io::{generic::IO, io_uring::UringIO}, runtime::{http, Runtime, RuntimeInner}, IoBuilder
+    io::{generic::IO, io_uring::UringIO}, runtime::{http, RuntimeInner}, IoBuilder
 };
 use tracing_subscriber;
 
@@ -37,10 +38,10 @@ fn main() {
 
     loop {
         if let Err(err) = rt.step() {
-            dbg!("Err during rt step: {:?}", err);
+            error!("Err during rt step: {:?}", err);
         };
         if let Err(err) = io.step() {
-            dbg!("Err during io step: {:?}", err);
+            error!("Err during io step: {:?}", err);
         };
     }
 }

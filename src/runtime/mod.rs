@@ -81,6 +81,7 @@ impl ProgramsStorage {
         Self(slab::Slab::with_capacity(capacity))
     }
 
+    // panics if id is not valid
     fn take(&mut self, id: usize) -> Option<Box<dyn Program>> {
         self.0[id].take()
     }
