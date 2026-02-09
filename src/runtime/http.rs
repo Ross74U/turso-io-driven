@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::sync::Arc;
-use super::{Runtime, Program, ProgramWaker, unwrap_completion};
+use super::{Runtime, Program, ProgramWaker, unwrap_completion, routes};
 use crate::io::completion::{Completion, SharedCompletion, AppCompletion};
 use crate::io::generic::{ServerSocket, ClientConnection};
 use tracing::{info};
@@ -25,11 +25,6 @@ impl Program for HttpServer {
             unwrap_completion!(
                 c == AppCompletion::Accept,
                 |c| { 
-                    info!(
-                        "accept completion result {:?} {:?} {:?}",
-                        c.result(), c.sockaddr(), c.addrlen()
-                    );
-                    
                     match c.sockaddr().sa_family as i32 {
                         libc::AF_INET => {},
                         _ => panic!("only support IPv4")
@@ -65,7 +60,7 @@ pub struct HandleHttpClient {
     parent: Runtime, // parent runtime
     req_buf: Vec<u8>,
     completion: Option<SharedCompletion>,
-    resp_state_machine: Option<HttpResponseState>
+    resp_state_machine: Option<Routes>
 }
 
 impl HandleHttpClient {
@@ -82,7 +77,6 @@ impl HandleHttpClient {
     }
 
     fn close_connection(&mut self, waker: ProgramWaker) {
-        info!("closing connection");
         if let Some(id) = waker.id() {
             self.parent.deregister(id);
         }
@@ -107,7 +101,10 @@ impl Program for HandleHttpClient {
                         c == AppCompletion::Recv,
                         |c| { 
                             if c.result() == Some(0) {
-                                // eof 
+                                // handle premature EOF 
+                                // (client disconnection before sending a complete http request) 
+                                self.close_connection(waker.clone());
+                                return Ok(());
                             } else {
                                 self.req_buf.extend(c.buf());
                             }
@@ -125,13 +122,15 @@ impl Program for HandleHttpClient {
                         self.completion = Some(recvc);
                     }
                     Ok(Status::Complete(_body_offset)) => { 
-                        info!("complete! responding");
-                        let mut resp_state = HttpResponseState::new(self.conn.clone());
-                        resp_state.step(waker.clone())?; // step once to initiate (lazy)
-                        self.resp_state_machine = Some(resp_state);
+                        let mut resp_program = match req.path {
+                            Some("/") => Routes::health_check(self.conn.clone()),
+                            _ => Routes::not_found(self.conn.clone()),
+                        };
+                        resp_program.step(waker.clone())?; // step once to initiate (lazy)
+                        self.resp_state_machine = Some(resp_program);
                         self.state = ClientState::Responding;
                     }
-                    Err(_error) => { todo!() }
+                    Err(_error) => { todo!("handle malformed http request") }
                 } 
             }
         }
@@ -140,6 +139,26 @@ impl Program for HandleHttpClient {
     }
 }
 
+enum Routes {
+    HealthCheck(HealthCheckProgram),
+    NotFound(NotFoundProgram),
+}
+
+impl Routes {
+    fn health_check(conn: Arc<dyn ClientConnection>) -> Self {
+        Self::HealthCheck(HealthCheckProgram::new(conn))
+    }
+    fn not_found(conn: Arc<dyn ClientConnection>) -> Self {
+        Self::NotFound(NotFoundProgram::new(conn))
+    }
+
+    fn step(&mut self, waker: ProgramWaker) -> Result<State<()>> {
+        match self {
+            Self::HealthCheck(p) => {p.step(waker)}
+            Self::NotFound(p) => {p.step(waker)}
+        }
+    } 
+}
 
 enum State<T> {
     Complete(T),
@@ -147,19 +166,18 @@ enum State<T> {
 }
 
 /// state machine (sub-future in HandleHttpClient program)
-struct HttpResponseState {
+struct HealthCheckProgram {
     conn: Arc<dyn ClientConnection>,
     completion: Option<SharedCompletion>,
 }
 
-impl HttpResponseState { 
+impl HealthCheckProgram { 
     fn new(conn: Arc<dyn ClientConnection>) -> Self {
         Self { conn, completion: None }
     }
     fn step(&mut self, waker: ProgramWaker) -> Result<State<()>> {
-        info!("stepping response machine");
         if self.completion.is_none() {
-            let body = b"hello world";
+            let body = b"running";
             let response = Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", "text/plain")
@@ -168,6 +186,32 @@ impl HttpResponseState {
             let mut buf = Vec::new();
             encode_http1_response_head(&response, &mut buf);
             buf.extend_from_slice(body);
+            let sendc = Arc::new(Completion::AppCompletion(AppCompletion::new_send(waker, buf)));
+            self.conn.send(sendc.clone())?;
+            self.completion = Some(sendc);
+            Ok(State::Pending)
+        } else {
+            Ok(State::Complete(()))
+        }
+    }
+}
+
+struct NotFoundProgram {
+    conn: Arc<dyn ClientConnection>,
+    completion: Option<SharedCompletion>,
+}
+
+impl NotFoundProgram { 
+    fn new(conn: Arc<dyn ClientConnection>) -> Self {
+        Self { conn, completion: None }
+    }
+    fn step(&mut self, waker: ProgramWaker) -> Result<State<()>> {
+        if self.completion.is_none() {
+            let response = Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(())?;
+            let mut buf = Vec::new();
+            encode_http1_response_head(&response, &mut buf);
             let sendc = Arc::new(Completion::AppCompletion(AppCompletion::new_send(waker, buf)));
             self.conn.send(sendc.clone())?;
             self.completion = Some(sendc);
