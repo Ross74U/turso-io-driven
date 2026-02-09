@@ -1,6 +1,7 @@
 #![allow(clippy::arc_with_non_send_sync)]
 
 pub mod http;
+mod routes;
 
 use crate::io::generic::IO;
 use crate::unwrap_completion;
