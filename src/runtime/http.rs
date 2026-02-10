@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::sync::Arc;
-use super::{Runtime, Program, ProgramWaker, unwrap_completion, StepResult, routes::{get_route_handler, Route}};
+use super::{Runtime, Program, ProgramWaker, unwrap_completion, StepResult, routes::{get_route_handler, RouteHandler}};
 use crate::io::completion::{Completion, SharedCompletion, AppCompletion};
 use crate::io::generic::{ServerSocket, ClientConnection};
 use tracing::{info};
@@ -59,7 +59,7 @@ pub struct HandleHttpClient {
     parent: Runtime, // parent runtime
     req_buf: Vec<u8>,
     completion: Option<SharedCompletion>,
-    resp_state_machine: Option<Route>
+    resp_state_machine: Option<RouteHandler>
 }
 
 impl HandleHttpClient {
@@ -121,7 +121,7 @@ impl Program for HandleHttpClient {
                         self.completion = Some(recvc);
                     }
                     Ok(Status::Complete(_body_offset)) => { 
-                        let mut resp_program = get_route_handler(req.path, self.conn.clone());
+                        let mut resp_program = get_route_handler(req, self.conn.clone());
                         resp_program.step(waker.clone())?; // step once to initiate (lazy)
                         self.resp_state_machine = Some(resp_program);
                         self.state = ClientState::Responding;
