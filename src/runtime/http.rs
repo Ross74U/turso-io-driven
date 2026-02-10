@@ -1,11 +1,10 @@
 use anyhow::Result;
 use std::sync::Arc;
-use super::{Runtime, Program, ProgramWaker, unwrap_completion, routes};
+use super::{Runtime, Program, ProgramWaker, unwrap_completion, StepResult, routes::{get_route_handler, Route}};
 use crate::io::completion::{Completion, SharedCompletion, AppCompletion};
 use crate::io::generic::{ServerSocket, ClientConnection};
 use tracing::{info};
 use httparse::{Request, Status};
-use http::{Response, StatusCode};
 
 pub struct HttpServer {
     server_sock: Arc<dyn ServerSocket>,
@@ -60,7 +59,7 @@ pub struct HandleHttpClient {
     parent: Runtime, // parent runtime
     req_buf: Vec<u8>,
     completion: Option<SharedCompletion>,
-    resp_state_machine: Option<Routes>
+    resp_state_machine: Option<Route>
 }
 
 impl HandleHttpClient {
@@ -90,8 +89,8 @@ impl Program for HandleHttpClient {
             ClientState::Responding => {
                 let Some(resp_state) = self.resp_state_machine.as_mut() else {unreachable!()};
                 match resp_state.step(waker.clone())? {
-                    State::Pending => {}
-                    State::Complete(_) => {self.close_connection(waker);} // we've sent everything, close
+                    StepResult::Pending => {}
+                    StepResult::Complete(_) => {self.close_connection(waker);} // we've sent everything, close
                     // connection
                 } 
             }
@@ -122,10 +121,7 @@ impl Program for HandleHttpClient {
                         self.completion = Some(recvc);
                     }
                     Ok(Status::Complete(_body_offset)) => { 
-                        let mut resp_program = match req.path {
-                            Some("/") => Routes::health_check(self.conn.clone()),
-                            _ => Routes::not_found(self.conn.clone()),
-                        };
+                        let mut resp_program = get_route_handler(req.path, self.conn.clone());
                         resp_program.step(waker.clone())?; // step once to initiate (lazy)
                         self.resp_state_machine = Some(resp_program);
                         self.state = ClientState::Responding;
@@ -139,103 +135,3 @@ impl Program for HandleHttpClient {
     }
 }
 
-enum Routes {
-    HealthCheck(HealthCheckProgram),
-    NotFound(NotFoundProgram),
-}
-
-impl Routes {
-    fn health_check(conn: Arc<dyn ClientConnection>) -> Self {
-        Self::HealthCheck(HealthCheckProgram::new(conn))
-    }
-    fn not_found(conn: Arc<dyn ClientConnection>) -> Self {
-        Self::NotFound(NotFoundProgram::new(conn))
-    }
-
-    fn step(&mut self, waker: ProgramWaker) -> Result<State<()>> {
-        match self {
-            Self::HealthCheck(p) => {p.step(waker)}
-            Self::NotFound(p) => {p.step(waker)}
-        }
-    } 
-}
-
-enum State<T> {
-    Complete(T),
-    Pending
-}
-
-/// state machine (sub-future in HandleHttpClient program)
-struct HealthCheckProgram {
-    conn: Arc<dyn ClientConnection>,
-    completion: Option<SharedCompletion>,
-}
-
-impl HealthCheckProgram { 
-    fn new(conn: Arc<dyn ClientConnection>) -> Self {
-        Self { conn, completion: None }
-    }
-    fn step(&mut self, waker: ProgramWaker) -> Result<State<()>> {
-        if self.completion.is_none() {
-            let body = b"running";
-            let response = Response::builder()
-                .status(StatusCode::OK)
-                .header("content-type", "text/plain")
-                .header("content-length", format!("{}", body.len()))
-                .body(())?;
-            let mut buf = Vec::new();
-            encode_http1_response_head(&response, &mut buf);
-            buf.extend_from_slice(body);
-            let sendc = Arc::new(Completion::AppCompletion(AppCompletion::new_send(waker, buf)));
-            self.conn.send(sendc.clone())?;
-            self.completion = Some(sendc);
-            Ok(State::Pending)
-        } else {
-            Ok(State::Complete(()))
-        }
-    }
-}
-
-struct NotFoundProgram {
-    conn: Arc<dyn ClientConnection>,
-    completion: Option<SharedCompletion>,
-}
-
-impl NotFoundProgram { 
-    fn new(conn: Arc<dyn ClientConnection>) -> Self {
-        Self { conn, completion: None }
-    }
-    fn step(&mut self, waker: ProgramWaker) -> Result<State<()>> {
-        if self.completion.is_none() {
-            let response = Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(())?;
-            let mut buf = Vec::new();
-            encode_http1_response_head(&response, &mut buf);
-            let sendc = Arc::new(Completion::AppCompletion(AppCompletion::new_send(waker, buf)));
-            self.conn.send(sendc.clone())?;
-            self.completion = Some(sendc);
-            Ok(State::Pending)
-        } else {
-            Ok(State::Complete(()))
-        }
-    }
-}
-
-pub fn encode_http1_response_head<B>(resp: &Response<B>, out: &mut Vec<u8>) {
-    let code = resp.status().as_u16();
-    let reason = resp.status().canonical_reason().unwrap_or("");
-    out.extend_from_slice(b"HTTP/1.1 ");
-    out.extend_from_slice(code.to_string().as_bytes());
-    out.extend_from_slice(b" ");
-    out.extend_from_slice(reason.as_bytes());
-    out.extend_from_slice(b"\r\n");
-
-    for (name, value) in resp.headers().iter() {
-        out.extend_from_slice(name.as_str().as_bytes());
-        out.extend_from_slice(b": ");
-        out.extend_from_slice(value.as_bytes());
-        out.extend_from_slice(b"\r\n");
-    }
-    out.extend_from_slice(b"\r\n");
-}

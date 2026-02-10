@@ -125,3 +125,8 @@ impl ProgramWaker {
         }
     }
 }
+
+pub enum StepResult<T> {
+    Complete(T),
+    Pending
+}
