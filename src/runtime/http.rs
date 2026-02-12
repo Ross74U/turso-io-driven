@@ -1,6 +1,8 @@
 use anyhow::Result;
-use std::sync::Arc;
-use super::{Runtime, Program, ProgramWaker, unwrap_completion, StepResult, routes::{get_route_handler, RouteHandler}};
+use std::{mem, sync::Arc};
+use super::{Runtime, Program, ProgramWaker, unwrap_completion, StepResult,
+    routes::{get_route_handler, RouteHandler, OwnedRequest}
+};
 use crate::io::completion::{Completion, SharedCompletion, AppCompletion};
 use crate::io::generic::{ServerSocket, ClientConnection};
 use tracing::{info};
@@ -89,8 +91,13 @@ impl Program for HandleHttpClient {
             ClientState::Responding => {
                 let Some(resp_state) = self.resp_state_machine.as_mut() else {unreachable!()};
                 match resp_state.step(waker.clone())? {
-                    StepResult::Pending => {}
-                    StepResult::Complete(_) => {self.close_connection(waker);} // we've sent everything, close
+                    StepResult::Pending => {
+                        info!("pending");
+                    }
+                    StepResult::Complete(_) => {
+                        info!("complete");
+                        self.close_connection(waker);
+                    } // we've sent everything, close
                     // connection
                 } 
             }
@@ -120,8 +127,10 @@ impl Program for HandleHttpClient {
                         self.conn.recv(recvc.clone())?;
                         self.completion = Some(recvc);
                     }
-                    Ok(Status::Complete(_body_offset)) => { 
-                        let mut resp_program = get_route_handler(req, self.conn.clone());
+                    Ok(Status::Complete(_)) => { 
+                        let req_buf = mem::take(&mut self.req_buf);
+                        let owned_req = OwnedRequest::from_buf(req_buf)?;
+                        let mut resp_program = get_route_handler(owned_req, self.conn.clone());
                         resp_program.step(waker.clone())?; // step once to initiate (lazy)
                         self.resp_state_machine = Some(resp_program);
                         self.state = ClientState::Responding;

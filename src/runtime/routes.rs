@@ -1,10 +1,12 @@
 use crate::io::generic::ClientConnection;
 use crate::io::completion::{Completion, SharedCompletion, AppCompletion};
-use super::{ProgramWaker, StepResult};
+use super::{ProgramWaker, StepResult, receive_body::ReceivingBodyProgram};
 use std::sync::Arc;
+use std::mem; 
 use http::{Response, StatusCode};
 use anyhow::{Result, Context, anyhow};
-use httparse::Request;
+use rustix::path::Arg;
+use tracing::{info, error};
 
 pub enum RouteHandler {
     HealthCheck(HealthCheckProgram),
@@ -33,18 +35,13 @@ impl RouteHandler {
 }
 
 enum PostOpProgramState {
-    ReceivingBody(ReceivingBodyState),
+    ReceivingBody(ReceivingBodyProgram),
     Initializing,
     Updating,
     Responding,
     RespondingError(HttpErrorProgram),
 }
 
-struct ReceivingBodyState {
-    chunked: bool,
-    received: u64,
-    content_length: Option<u64>
-}
 
 pub struct PostOpProgram {
     conn: Arc<dyn ClientConnection>,
@@ -55,7 +52,7 @@ pub struct PostOpProgram {
 }
 
 impl PostOpProgram {
-    fn new(conn: Arc<dyn ClientConnection>, req: OwnedRequest, id: String) -> Self {
+    fn new(conn: Arc<dyn ClientConnection>, mut req: OwnedRequest, id: String) -> Self {
         fn is_application_json(ct: &str) -> bool {
             // Accept: "application/json" plus parameters, any casing, extra whitespace.
             // e.g. "Application/JSON; charset=utf-8"
@@ -93,12 +90,12 @@ impl PostOpProgram {
             if chunked && content_length.is_some() {
                 return PostOpProgramState::RespondingError(HttpErrorProgram::new(conn.clone(), StatusCode::BAD_REQUEST));
             }
-
-            PostOpProgramState::ReceivingBody(ReceivingBodyState {
-                chunked,
-                content_length,
-                received: 0,
-            })
+            
+            // from this point req.buf is no longer meaningful
+            let mut body_buf = mem::take(&mut req.buf); 
+            
+            let body_buf = body_buf.split_off(req.body_offset); 
+            PostOpProgramState::ReceivingBody(ReceivingBodyProgram::new(conn.clone(), chunked, content_length, body_buf))
         })();
 
         Self {
@@ -109,10 +106,25 @@ impl PostOpProgram {
             id,
         }
     }
+
     fn step(&mut self, waker: ProgramWaker) -> Result<StepResult<()>> {
         match &mut self.state {
             PostOpProgramState::ReceivingBody(state) => {
-                todo!()
+                match state.step(waker.clone()) {
+                    Ok(StepResult::Complete(())) => {
+                        info!("body: {}", state.raw().to_string_lossy());
+                        self.raise_http_error(StatusCode::OK, waker);
+                        return Ok(StepResult::Pending);
+                    }
+                    Ok(StepResult::Pending) => {
+                        return Ok(StepResult::Pending);
+                    }
+                    Err(error) => {
+                        error!("Error occured while receiving body: {error}");
+                        self.raise_http_error(StatusCode::BAD_REQUEST, waker);
+                        return Ok(StepResult::Pending);
+                    }
+                }
             }
             PostOpProgramState::Initializing => {
                 todo!()
@@ -128,6 +140,12 @@ impl PostOpProgram {
             }
         }
     }
+    
+    fn raise_http_error(&mut self, status: StatusCode, waker: ProgramWaker) {
+        let mut program = HttpErrorProgram::new(self.conn.clone(), status);
+        program.step(waker);
+        self.state = PostOpProgramState::RespondingError(program);
+    } 
 }
 
 /// state machine (sub-future in HandleHttpClient program)
@@ -188,41 +206,32 @@ impl HttpErrorProgram {
     }
 }
 
-pub fn get_route_handler(req: Request, conn: Arc<dyn ClientConnection>) -> RouteHandler {
-    let Some(path) = req.path else {return RouteHandler::http_error(conn, StatusCode::NOT_FOUND)};
-    let path = path.trim();
+pub fn get_route_handler(
+    req: OwnedRequest,
+    conn: Arc<dyn ClientConnection>,
+) -> RouteHandler {
+    let method = req.method.clone(); // or &req.method if you prefer
+    let path = req.path.trim();
     let path = path.split(['?', '#']).next().unwrap_or("");
     let trimmed = path.trim_matches('/');
     let segments: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
 
-    type Matcher<'a> = dyn Fn(&[&str]) -> Option<RouteHandler> + 'a;
+    // /
+    if segments.is_empty() {
+        return RouteHandler::health_check(conn.clone());
+    }
 
-    let root = |segs: &[&str]| (segs.is_empty()).then(|| RouteHandler::health_check(conn.clone()));
-
-    let db = |segs: &[&str]| {
-        // Only match /db/<id> where <id> is non-empty.
-        let id = match segs {
-            ["db", id] if !id.is_empty() => *id,
-            _ => return None,
-        };
-        
-        let Ok(owned_request) = OwnedRequest::from_httparse(&req) else {
-            return Some(RouteHandler::http_error(conn.clone(), StatusCode::BAD_REQUEST))
-        };
-
-        match req.method? {
-            "POST" => Some(RouteHandler::db_post(conn.clone(), owned_request, id.to_owned())),
-            "GET"  => Some(RouteHandler::health_check(conn.clone())),
-            _      => None,
+    // /db/<id>
+    if let ["db", id] = segments.as_slice() {
+        if id.is_empty() {
+            return RouteHandler::http_error(conn, StatusCode::NOT_FOUND);
         }
-    };
-
-    let matchers: [&Matcher; 2] = [&root, &db];
-
-    for m in matchers {
-        if let Some(route) = m(&segments) {
-            return route;
-        }
+        let id = (*id).to_owned();
+        return match method.as_str() {
+            "POST" => RouteHandler::db_post(conn.clone(), req, id),
+            "GET"  => RouteHandler::health_check(conn.clone()),
+            _      => RouteHandler::http_error(conn, StatusCode::METHOD_NOT_ALLOWED),
+        };
     }
 
     RouteHandler::http_error(conn, StatusCode::NOT_FOUND)
@@ -234,6 +243,8 @@ pub struct OwnedRequest {
     pub path: String,
     pub version: u8,
     pub headers: Vec<(String, Vec<u8>)>,
+    pub buf: Vec<u8>,
+    pub body_offset: usize
 }
 
 impl OwnedRequest {
@@ -264,18 +275,23 @@ impl OwnedRequest {
         Some(v.to_ascii_lowercase())
     }
 
-    pub fn from_httparse(req: &httparse::Request<'_, '_>) -> Result<Self> {
-        let method = req
-            .method
-            .context("httparse request missing method")?
-            .to_owned();
-        let path = req
-            .path
-            .context("httparse request missing path")?
-            .to_owned();
-        let version = req
-            .version
-            .context("httparse request missing version")?;
+    pub fn from_buf(req_buf: Vec<u8>) -> Result<Self> {
+        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut req = httparse::Request::new(&mut headers);
+
+        let status = req
+            .parse(&req_buf)
+            .context("failed to parse HTTP request")?;
+
+        let body_offset = match status {
+            httparse::Status::Complete(n) => n,
+            httparse::Status::Partial => return Err(anyhow!("request is partial")),
+        };
+
+        let method = req.method.context("httparse request missing method")?.to_owned();
+        let path = req.path.context("httparse request missing path")?.to_owned();
+        let version = req.version.context("httparse request missing version")?;
+
         let headers = req
             .headers
             .iter()
@@ -287,7 +303,15 @@ impl OwnedRequest {
             })
             .collect::<Result<Vec<_>>>()
             .context("failed to copy headers")?;
-        Ok(Self { method, path, version, headers, })
+
+        Ok(Self {
+            method,
+            path,
+            version,
+            headers,
+            body_offset,
+            buf: req_buf,
+        })
     }
 }
 
