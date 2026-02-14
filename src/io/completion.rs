@@ -42,7 +42,9 @@ impl AppCompletion {
         let c = RecvCompletion {
             waker,
             result: UnsafeCell::new(None),
-            buf: UnsafeCell::new(vec![0u8; len])
+            buf: UnsafeCell::new(vec![0u8; len]),
+            complete: UnsafeCell::new(false),
+            len
         };
         Self::Recv(c)
     }
@@ -94,28 +96,46 @@ impl AcceptCompletion {
 }
 
 pub struct RecvCompletion {
+    complete: UnsafeCell<bool>,
     waker: ProgramWaker,
     result: UnsafeCell<Option<i32>>,
-    buf: UnsafeCell<Vec<u8>>
+    buf: UnsafeCell<Vec<u8>>,
+    len: usize
 }
 impl RecvCompletion {
     fn callback(&self, result: i32) {
         unsafe {
+            let complete = &mut *self.complete.get();
+            *complete = true;
             let r = &mut *self.result.get();
             *r = Some(result);
         }
         self.waker.wake_by_ref();
     }
     pub fn result(&self) -> Option<i32>{
-        unsafe { *self.result.get() } 
+        unsafe {
+            if !*self.complete.get() {
+                panic!("result call without completion")
+            }
+            *self.result.get() 
+        } 
     }
     /// aliasing-rule: can only be from cqe, by program
     pub fn buf(&self) -> &[u8]{
-        unsafe { &mut *self.buf.get() as & _} 
+        unsafe { 
+            if !*self.complete.get() {
+                panic!("result call without completion")
+            }
+            &mut *self.buf.get() as & _
+        } 
     }
     /// aliasing-rules: only used to create sqe
     pub fn buf_mut(&self) -> &mut Vec<u8>{
         unsafe { &mut *self.buf.get() as &mut _} 
+    }
+    
+    pub fn len(&self) -> usize { 
+        self.len
     }
 }
 

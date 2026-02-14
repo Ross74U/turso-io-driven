@@ -1094,7 +1094,7 @@ impl ClientConnection for UringClientConnection {
             c == AppCompletion::Recv,
             |recvc| {
                 let fd = io_uring::types::Fd(self.fd);
-                let sqe = opcode::Recv::new(fd, recvc.buf_mut().as_mut_ptr(), recvc.buf().len() as _)
+                let sqe = opcode::Recv::new(fd, recvc.buf_mut().as_mut_ptr(), recvc.len() as _)
                     .build()
                     .user_data(get_key_from_completion(c));
 
