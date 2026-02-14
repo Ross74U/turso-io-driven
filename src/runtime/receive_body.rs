@@ -62,14 +62,19 @@ impl ReceivingBodyProgram {
             unwrap_completion!(
                 c == AppCompletion::Recv,
                 |c| {
-                    if let Some(read) = c.result() {
-                        if read == 0 {
+                    match c.result() {
+                        Some(0) => {
                             return Err(anyhow!("premature client disconnection"));
                         }
-                        self.received += read as u64;
-
-                        // IMPORTANT: these are encoded bytes (chunk framing + data)
-                        self.in_buf.extend_from_slice(c.buf());
+                        Some(-1) => {
+                            return Err(anyhow!("socket error occured while recv body"));
+                        }
+                        Some(n) => {
+                            self.received += n as u64;
+                            // IMPORTANT: these are encoded bytes (chunk framing + data)
+                            self.in_buf.extend_from_slice(c.buf());
+                        }
+                        None => { unreachable!("spurious wakeup") }
                     }
                 },
                 { unreachable!() }

@@ -5,7 +5,7 @@ use super::{Runtime, Program, ProgramWaker, unwrap_completion, StepResult,
 };
 use crate::io::completion::{Completion, SharedCompletion, AppCompletion};
 use crate::io::generic::{ServerSocket, ClientConnection};
-use tracing::{info};
+use tracing::{info, error};
 use httparse::{Request, Status};
 
 pub struct HttpServer {
@@ -97,8 +97,7 @@ impl Program for HandleHttpClient {
                     StepResult::Complete(_) => {
                         info!("complete");
                         self.close_connection(waker);
-                    } // we've sent everything, close
-                    // connection
+                    } // we've sent everything, close connection
                 } 
             }
             ClientState::Receiving => {
@@ -106,13 +105,23 @@ impl Program for HandleHttpClient {
                     unwrap_completion!(
                         c == AppCompletion::Recv,
                         |c| { 
-                            if c.result() == Some(0) {
-                                // handle premature EOF 
-                                // (client disconnection before sending a complete http request) 
-                                self.close_connection(waker.clone());
-                                return Ok(());
-                            } else {
-                                self.req_buf.extend(c.buf());
+                            match c.result() {
+                                Some(0) => {
+                                    // handle premature EOF 
+                                    // (client disconnection before sending a complete http request) 
+                                    self.close_connection(waker.clone());
+                                    return Ok(());
+                                }
+                                Some(-1) => {
+                                    // socket error
+                                    error!("socket error");
+                                    self.close_connection(waker.clone());
+                                    return Ok(());
+                                }
+                                Some(_) => { 
+                                    self.req_buf.extend(c.buf());
+                                }
+                                None => { unreachable!("Spurious calls on waker") }
                             }
                         },
                         { unreachable!() }

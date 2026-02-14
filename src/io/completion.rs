@@ -43,7 +43,7 @@ impl AppCompletion {
             waker,
             result: UnsafeCell::new(None),
             buf: UnsafeCell::new(vec![0u8; len]),
-            complete: UnsafeCell::new(false),
+            is_complete: UnsafeCell::new(false),
             len
         };
         Self::Recv(c)
@@ -96,7 +96,7 @@ impl AcceptCompletion {
 }
 
 pub struct RecvCompletion {
-    complete: UnsafeCell<bool>,
+    is_complete: UnsafeCell<bool>,
     waker: ProgramWaker,
     result: UnsafeCell<Option<i32>>,
     buf: UnsafeCell<Vec<u8>>,
@@ -105,7 +105,7 @@ pub struct RecvCompletion {
 impl RecvCompletion {
     fn callback(&self, result: i32) {
         unsafe {
-            let complete = &mut *self.complete.get();
+            let complete = &mut *self.is_complete.get();
             *complete = true;
             let r = &mut *self.result.get();
             *r = Some(result);
@@ -114,7 +114,7 @@ impl RecvCompletion {
     }
     pub fn result(&self) -> Option<i32>{
         unsafe {
-            if !*self.complete.get() {
+            if !*self.is_complete.get() {
                 panic!("result call without completion")
             }
             *self.result.get() 
@@ -123,7 +123,7 @@ impl RecvCompletion {
     /// aliasing-rule: can only be from cqe, by program
     pub fn buf(&self) -> &[u8]{
         unsafe { 
-            if !*self.complete.get() {
+            if !*self.is_complete.get() {
                 panic!("result call without completion")
             }
             &mut *self.buf.get() as & _
