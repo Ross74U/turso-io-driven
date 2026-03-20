@@ -1,17 +1,20 @@
 use crate::io::generic::ClientConnection;
 use crate::io::completion::{Completion, SharedCompletion, AppCompletion};
-use super::{ProgramWaker, StepResult, receive_body::ReceivingBodyProgram};
+use super::{ProgramWaker, StepResult, 
+    receive_body::{ReceivingBodyProgram, PartHeaders, PartDisposition, MultipartBodyProgram}
+};
 use std::sync::Arc;
 use std::mem; 
 use http::{Response, StatusCode};
-use anyhow::{Result, Context, anyhow};
+use anyhow::{Result, Context, anyhow, bail};
 use rustix::path::Arg;
+use serde::Deserialize;
 use tracing::{info, error};
 
 pub enum RouteHandler {
     HealthCheck(HealthCheckProgram),
     HttpError(HttpErrorProgram),
-    PostOp(PostOpProgram)
+    Embed(EmbedFileProgram)
 }
 
 impl RouteHandler {
@@ -22,20 +25,26 @@ impl RouteHandler {
         Self::HttpError(HttpErrorProgram::new(conn, status))
     }
     pub fn db_post(conn: Arc<dyn ClientConnection>, req: OwnedRequest, id: String) -> Self {
-        Self::PostOp(PostOpProgram::new(conn, req, id))
+        Self::Embed(EmbedFileProgram::new(conn, req, id))
     }
 
     pub fn step(&mut self, waker: ProgramWaker) -> Result<StepResult<()>> {
         match self {
             Self::HealthCheck(p) => {p.step(waker)}
             Self::HttpError(p) => {p.step(waker)}
-            Self::PostOp(p) => {p.step(waker)}
+            Self::Embed(p) => {p.step(waker)}
         }
     } 
 }
 
+#[derive(Deserialize, Debug)]
+struct PostOpBody {
+    doc_id: String,
+    text: String,
+}
+
 enum PostOpProgramState {
-    ReceivingBody(ReceivingBodyProgram),
+    ReceivingBody(MultipartBodyProgram),
     Initializing,
     Updating,
     Responding,
@@ -43,7 +52,7 @@ enum PostOpProgramState {
 }
 
 
-pub struct PostOpProgram {
+pub struct EmbedFileProgram {
     conn: Arc<dyn ClientConnection>,
     req: OwnedRequest,
     id: String,
@@ -51,42 +60,30 @@ pub struct PostOpProgram {
     state: PostOpProgramState
 }
 
-impl PostOpProgram {
+impl EmbedFileProgram {
     fn new(conn: Arc<dyn ClientConnection>, mut req: OwnedRequest, id: String) -> Self {
-        fn is_application_json(ct: &str) -> bool {
-            // Accept: "application/json" plus parameters, any casing, extra whitespace.
-            // e.g. "Application/JSON; charset=utf-8"
-            ct.split(';')
-                .next()
-                .map(|v| v.trim())
-                .is_some_and(|media_type| media_type.eq_ignore_ascii_case("application/json"))
-        }
-
-        fn transfer_encoding_has_chunked(te: &str) -> bool {
-            // Accept comma-separated codings, any casing, extra whitespace.
-            // e.g. "gzip, chunked"
-            te.split(',')
-                .map(|v| v.trim())
-                .any(|coding| coding.eq_ignore_ascii_case("chunked"))
-        }
-
         let state = (|| {
-            let Some(content_type) = req.header("content-type") else {
+            let Ok(ContentType::MultiPart(boundary)) = req.content_type() else {
                 return PostOpProgramState::RespondingError(HttpErrorProgram::new(conn.clone(), StatusCode::BAD_REQUEST));
             };
-            if !is_application_json(content_type) {
-                return PostOpProgramState::RespondingError(HttpErrorProgram::new(conn.clone(), StatusCode::BAD_REQUEST));
-            }
 
-            let chunked = req
-                .header("transfer-encoding")
-                .is_some_and(transfer_encoding_has_chunked);
+						let part_router = |h: &PartHeaders| -> PartDisposition {
+						    if h.content_type.as_deref().map_or(false, |c| c.contains("json")) {
+						        PartDisposition::Buffer
+						    } else if h.filename.is_some() {
+						        let name = h.filename.as_deref().unwrap_or("file");
+						        PartDisposition::StreamToFile(format!("/tmp/{name}").into())
+						    } else {
+						        PartDisposition::Discard
+						    }
+						};
 
+            let chunked = req.is_chunked();
             let content_length = req
                 .header("content-length")
                 .and_then(|s| s.parse::<u64>().ok());
 
-            // If both are present, it's ambiguous. Many servers reject this (good security posture).
+            // If both are present, reject
             if chunked && content_length.is_some() {
                 return PostOpProgramState::RespondingError(HttpErrorProgram::new(conn.clone(), StatusCode::BAD_REQUEST));
             }
@@ -95,7 +92,11 @@ impl PostOpProgram {
             let mut body_buf = mem::take(&mut req.buf); 
             
             let body_buf = body_buf.split_off(req.body_offset); 
-            PostOpProgramState::ReceivingBody(ReceivingBodyProgram::new(conn.clone(), chunked, content_length, body_buf))
+						let program = MultipartBodyProgram::new(
+						    conn.clone(), chunked, content_length, &boundary, body_buf,
+						    Box::new(part_router),
+						);
+            PostOpProgramState::ReceivingBody(program)
         })();
 
         Self {
@@ -112,7 +113,10 @@ impl PostOpProgram {
             PostOpProgramState::ReceivingBody(state) => {
                 match state.step(waker.clone()) {
                     Ok(StepResult::Complete(())) => {
-                        info!("body: {}", state.raw().to_string_lossy());
+                        info!("{}", state.raw().as_str()?);
+                        dbg!(state.raw().len());
+                        let json = state.deserialize::<PostOpBody>()?;
+                        info!("body: {:?}", json);
                         self.raise_http_error(StatusCode::OK, waker);
                         return Ok(StepResult::Pending);
                     }
@@ -238,6 +242,12 @@ pub fn get_route_handler(
 }
 
 #[derive(Debug)]
+pub enum ContentType {
+    Json,
+    MultiPart(String) // wrapper for boundary string
+}
+
+#[derive(Debug)]
 pub struct OwnedRequest {
     pub method: String,
     pub path: String,
@@ -273,6 +283,55 @@ impl OwnedRequest {
     pub fn header_lowercase(&self, key: &str) -> Option<String> {
         let v = self.header(key)?;
         Some(v.to_ascii_lowercase())
+    }
+    
+    pub fn is_chunked(&self) -> bool {
+        // Accept comma-separated codings, any casing, extra whitespace.
+        // e.g. "gzip, chunked"
+        let Some(te) = self.header("transfer-encoding") else { return false; };
+
+        te.split(',')
+            .map(|v| v.trim())
+            .any(|coding| coding.eq_ignore_ascii_case("chunked"))
+    }
+    
+    pub fn content_type(&self) -> Result<ContentType> {
+        let Some(ct) = self.header("content-type") else {
+            bail!("content-type header missing")
+        };
+
+        let ct = ct.trim();
+
+        let mut parts = ct.split(';').map(|s| s.trim()).filter(|s| !s.is_empty());
+        let media_type = parts
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("invalid content-type header: empty"))?
+            .to_ascii_lowercase();
+
+        if media_type == "application/json" {
+            return Ok(ContentType::Json);
+        }
+
+        if media_type == "multipart/form-data" {
+            // Find boundary parameter (case-insensitive on the key)
+            for p in parts {
+                let mut kv = p.splitn(2, '=').map(|s| s.trim());
+                let k = kv.next().unwrap_or("").to_ascii_lowercase();
+                let v = kv.next();
+                if k == "boundary" {
+                    let Some(v) = v else {
+                        bail!("multipart/form-data missing boundary value");
+                    };
+                    let boundary = v.trim().trim_matches('"').to_string();
+                    if boundary.is_empty() {
+                        bail!("multipart/form-data boundary is empty");
+                    }
+                    return Ok(ContentType::MultiPart(boundary));
+                }
+            }
+            bail!("multipart/form-data missing boundary parameter");
+        }
+        bail!("unsupported content-type: {}", ct)
     }
 
     pub fn from_buf(req_buf: Vec<u8>) -> Result<Self> {
